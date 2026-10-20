@@ -1,12 +1,15 @@
 // Página del alumno (index.html?e=ID). Todo el contenido del examen se pinta con
 // textContent: nunca se inserta HTML procedente del servidor.
-import { fetchExam, submitExam, beaconSubmit, NetworkError, ConfigError } from "./api.js";
+import { fetchExam, submitExam, fetchReview, beaconSubmit, NetworkError, ConfigError } from "./api.js";
 import { h } from "./dom.js";
 import { isReducedWindow } from "./presence.js";
 import { createWatcher } from "./watch.js";
 import { richNodes } from "./rich.js";
 import { normalize, seededShuffle, formatClock, penaltyFraction, formatNumber, newSendId } from "./util.js";
-import { parsePenalty } from "./grading.js";
+import { parsePenalty, questionValue, isOpenQuestion, isShortQuestion } from "./grading.js";
+import { MAX_SHORT_CHARS } from "./short.js";
+
+const MAX_OPEN_CHARS = 4000;
 
 const MAX_TEXT = 60;
 const RETRY_DELAYS = [2000, 4000, 8000];
@@ -52,6 +55,15 @@ const store = {
 
 const progressKey = (nombre, apellidos, grupo) => `examen:${examId}:${normalize(apellidos)}|${normalize(nombre)}|${normalize(grupo)}`;
 const lastKey = () => `examen:${examId}:ultimo`;
+// Envíos hechos desde este dispositivo: su identificador permite ver la revisión cuando el profesor la publique.
+const sentKey = () => `examen:${examId}:enviados`;
+const MAX_SENT = 20;
+
+function rememberSend(entry) {
+  const list = (Array.isArray(loadJson(sentKey())) ? loadJson(sentKey()) : []).filter((e) => e?.envioId !== entry.envioId);
+  list.unshift(entry);
+  store.set(sentKey(), JSON.stringify(list.slice(0, MAX_SENT)));
+}
 
 function loadJson(key) {
   try {
@@ -69,14 +81,15 @@ const fsSupported = Boolean(document.documentElement.requestFullscreen || docume
 const fsState = { failed: false }; // true si el navegador ha rechazado la pantalla completa: ya no se exige
 
 // Debe llamarse dentro de un gesto del usuario (pulsar o tocar). Si no se puede, se sigue sin ella.
-async function enterFullscreen() {
+// Un intento automático (auto) que falla no desactiva la exigencia: el siguiente toque lo reintenta.
+async function enterFullscreen({ auto = false } = {}) {
   if (!fsSupported || fsElement()) return;
   const el = document.documentElement;
   try {
     await (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
     fsState.failed = false;
   } catch {
-    fsState.failed = true;
+    if (!auto) fsState.failed = true;
   }
 }
 
@@ -98,16 +111,24 @@ function exitRule(fullscreen) {
 }
 
 // `penalizacion`: fracción elegida por el profesor ("1/4", "0"...) o vacía = automática (1/(opciones-1)).
-function scoringText(questions, penalizacion) {
+// `nShorts`: preguntas de respuesta corta según el servidor, para cuando el examen aún no está cargado (código de acceso).
+function scoringText(questions, penalizacion, nShorts = 0) {
   let custom = null;
   try {
     custom = parsePenalty(penalizacion);
   } catch {
     custom = null;
   }
-  const ks = new Set((questions ?? []).map((q) => q.options.length));
+  const qs = questions ?? [];
+  const tests = qs.filter((q) => !isOpenQuestion(q) && !isShortQuestion(q));
+  const shortCount = questions ? qs.filter(isShortQuestion).length : Number(nShorts) || 0;
+  const opens = qs.filter(isOpenQuestion);
+  const weighted = qs.some((q) => questionValue(q) !== 1); // alguna pregunta no vale 1 punto
+  const ks = new Set(tests.map((q) => q.options.length));
   let penalty; // texto de lo que resta cada error, o null si no resta nada
-  if (custom) {
+  if (questions && !tests.length) {
+    penalty = null; // solo hay preguntas de respuesta corta o abiertas: nada resta
+  } else if (custom) {
     penalty = custom.num === 0 ? null : custom.den === 1 ? `${custom.num} punto` : `${custom.num}/${custom.den} de punto`;
   } else {
     penalty =
@@ -115,11 +136,21 @@ function scoringText(questions, penalizacion) {
         ? `${penaltyFraction([...ks][0])} de punto`
         : "una fracción de punto (1/3 si la pregunta tiene 4 opciones)";
   }
+  if (weighted && penalty) penalty = penalty.replace(/ de punto$| punto$/, (m) => (m.startsWith(" de") ? " de los puntos de la pregunta" : " vez los puntos de la pregunta"));
   return [
-    "Cada respuesta correcta suma 1 punto.",
+    weighted ? "Cada pregunta indica los puntos que vale. Una respuesta correcta suma todos sus puntos." : "Cada respuesta correcta suma 1 punto.",
     penalty ? `Cada respuesta incorrecta resta ${penalty}.` : "Las respuestas incorrectas no restan.",
     "Las preguntas en blanco ni suman ni restan.",
     ...(penalty ? ["Si no estás seguro, puedes dejarla en blanco."] : []),
+    ...(shortCount
+      ? [
+          `${shortCount === 1 ? "Hay una pregunta" : `Hay ${shortCount} preguntas`} de respuesta corta: escribes una palabra, un número o una fórmula${penalty ? ", y si fallas no resta" : ""}.`,
+          { strong: "En las preguntas de respuesta corta se tiene en cuenta la ortografía, tildes incluidas: una palabra mal escrita cuenta como incorrecta. En las fórmulas, cuidado también con las mayúsculas (NaCl, CO2)." },
+        ]
+      : []),
+    ...(opens.length
+      ? [`Hay ${opens.length === 1 ? "una pregunta abierta" : `${opens.length} preguntas abiertas`}: escribes tu respuesta en un cuadro de texto (no se puede copiar ni pegar) y la corrige tu profesor.`]
+      : []),
   ];
 }
 
@@ -212,7 +243,7 @@ function showStart(info, exam) {
         "div",
         { class: "notice info" },
         h("p", {}, h("strong", {}, "Cómo se puntúa")),
-        scoringText(exam?.questions, exam?.penalizacion ?? info.penalizacion).map((t) => h("p", {}, t))
+        scoringText(exam?.questions, exam?.penalizacion ?? info.penalizacion, info.n_cortas).map((t) => (typeof t === "string" ? h("p", {}, t) : h("p", {}, h("strong", {}, t.strong))))
       ),
       info.control_salidas
         ? h(
@@ -249,6 +280,8 @@ function startExam(exam, who) {
   progress.segundosFuera = Number(progress.segundosFuera) || 0;
   progress.leftAt = progress.leftAt || null;
   progress.motivos = Array.isArray(progress.motivos) ? progress.motivos : [];
+  progress.open = progress.open && typeof progress.open === "object" ? progress.open : {};
+  progress.pegados = Number(progress.pegados) || 0;
   store.set(key, JSON.stringify(progress));
   store.set(lastKey(), JSON.stringify(who));
 
@@ -257,12 +290,13 @@ function startExam(exam, who) {
   let questions = exam.questions.map((q) => ({ ...q }));
   if (exam.barajar_preguntas) questions = seededShuffle(questions, `${seed}|q`);
   if (exam.barajar_opciones) {
-    questions = questions.map((q) => ({ ...q, options: seededShuffle(q.options, `${seed}|o|${q.id}`) }));
+    questions = questions.map((q) => (isOpenQuestion(q) ? q : { ...q, options: seededShuffle(q.options, `${seed}|o|${q.id}`) }));
   }
   // Descarta respuestas guardadas que ya no correspondan a este examen.
   for (const q of questions) {
     const given = progress.answers[q.id];
-    if (given && !q.options.some((o) => o.id === given)) delete progress.answers[q.id];
+    const fits = isShortQuestion(q) ? typeof given === "string" : !isOpenQuestion(q) && q.options.some((o) => o.id === given);
+    if (given && !fits) delete progress.answers[q.id];
   }
 
   renderExam({ exam, questions, who, key, progress });
@@ -285,13 +319,28 @@ function renderExam(session) {
   const timer = h("span", { class: "timer", role: "timer" });
   const status = h("div", { class: "status", hidden: true, role: "status" });
   const fieldset = h("fieldset", { class: "question" });
-  const answered = () => questions.filter((q) => progress.answers[q.id]).length;
+  const isAnswered = (q) => Boolean(String((isOpenQuestion(q) ? progress.open : progress.answers)[q.id] ?? "").trim());
+  const answered = () => questions.filter(isAnswered).length;
+  const showPoints = questions.some((q) => questionValue(q) !== 1);
   const updateCounter = () => (counter.textContent = `Contestadas: ${answered()} de ${total}`);
   const save = () => store.set(key, JSON.stringify(progress));
 
   questions.forEach((q, i) => {
     const group = h("fieldset", { class: "question card question-card", id: `p${i + 1}` });
-    group.append(h("legend", {}, h("span", { class: "qnum" }, `${i + 1}.`), ...richNodes(q.text, exam.imagenes)));
+    group.append(
+      h(
+        "legend",
+        {},
+        h("span", { class: "qnum" }, `${i + 1}.`),
+        ...richNodes(q.text, exam.imagenes),
+        showPoints ? h("span", { class: "points-badge" }, `${formatNumber(questionValue(q))} ${questionValue(q) === 1 ? "punto" : "puntos"}`) : null
+      )
+    );
+    if (isOpenQuestion(q) || isShortQuestion(q)) {
+      group.append(isOpenQuestion(q) ? openAnswerBox(q) : shortAnswerBox(q));
+      fieldset.append(group);
+      return;
+    }
     const name = `q-${q.id}`;
     const radios = q.options.map((o, j) => {
       const input = h("input", { type: "radio", name, value: o.id, checked: progress.answers[q.id] === o.id });
@@ -326,6 +375,86 @@ function renderExam(session) {
     fieldset.append(group);
   });
 
+  // Respuesta abierta: un cuadro de texto donde no se puede pegar, copiar, cortar ni arrastrar texto.
+  function openAnswerBox(q) {
+    const area = h("textarea", {
+      class: "open-answer",
+      rows: 6,
+      maxlength: MAX_OPEN_CHARS,
+      autocomplete: "off",
+      autocapitalize: "sentences",
+      spellcheck: "false",
+      "aria-label": "Tu respuesta",
+      placeholder: "Escribe aquí tu respuesta",
+    });
+    area.setAttribute("autocorrect", "off");
+    area.value = progress.open[q.id] ?? "";
+    const left = h("small", { class: "hint" });
+    const refresh = () => (left.textContent = `${area.value.length} / ${MAX_OPEN_CHARS} caracteres`);
+    noPaste(area);
+    area.addEventListener("input", () => {
+      progress.open[q.id] = area.value;
+      save();
+      refresh();
+      updateCounter();
+    });
+    refresh();
+    return h("div", { class: "open-box" }, area, left);
+  }
+
+  // Respuesta corta: una línea (palabra, número o fórmula) que se corrige sola. Sin mayúsculas ni
+  // correcciones automáticas del teclado, que estropearían fórmulas como NaCl.
+  function shortAnswerBox(q) {
+    const input = h("input", {
+      type: "text",
+      class: "open-answer short-answer",
+      maxlength: MAX_SHORT_CHARS,
+      autocomplete: "off",
+      autocapitalize: "off",
+      spellcheck: "false",
+      "aria-label": "Tu respuesta",
+      placeholder: "Escribe aquí tu respuesta",
+    });
+    input.setAttribute("autocorrect", "off");
+    input.value = progress.answers[q.id] ?? "";
+    noPaste(input);
+    input.addEventListener("input", () => {
+      progress.answers[q.id] = input.value;
+      save();
+      updateCounter();
+    });
+    // Intro no envía nada: solo cierra el teclado.
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        input.blur();
+      }
+    });
+    return h("div", { class: "open-box" }, input, h("small", { class: "hint" }, "Se tiene en cuenta la ortografía (también las tildes)."));
+  }
+
+  // En los cuadros de respuesta no se puede pegar, copiar, cortar ni arrastrar texto; cada intento de pegar
+  // queda registrado para el profesor.
+  function noPaste(el) {
+    const blocked = () => {
+      progress.pegados += 1;
+      save();
+    };
+    for (const type of ["paste", "drop"]) {
+      el.addEventListener(type, (e) => {
+        e.preventDefault();
+        blocked();
+      });
+    }
+    for (const type of ["copy", "cut", "dragstart"]) el.addEventListener(type, (e) => e.preventDefault());
+    el.addEventListener("beforeinput", (e) => {
+      if (e.inputType === "insertFromPaste" || e.inputType === "insertFromDrop" || e.inputType === "insertFromYank") {
+        e.preventDefault();
+        blocked();
+      }
+    });
+  }
+
   const reviewBtn = h("button", { type: "button", class: "btn block", onclick: () => confirmSend() }, "Revisar y enviar");
 
   const lock = () => {
@@ -334,7 +463,7 @@ function renderExam(session) {
   };
 
   function confirmSend() {
-    const blanks = questions.map((q, i) => (progress.answers[q.id] ? null : i + 1)).filter(Boolean);
+    const blanks = questions.map((q, i) => (isAnswered(q) ? null : i + 1)).filter(Boolean);
     const dialog = h("dialog");
     const close = () => {
       dialog.close();
@@ -383,7 +512,12 @@ function renderExam(session) {
 
   function buildPayload(motivo) {
     const respuestas = {};
-    for (const q of exam.questions) respuestas[q.id] = progress.answers[q.id] ?? null;
+    const abiertas = {};
+    for (const q of exam.questions) {
+      if (isOpenQuestion(q)) abiertas[q.id] = (progress.open[q.id] ?? "").slice(0, MAX_OPEN_CHARS);
+      else if (isShortQuestion(q)) respuestas[q.id] = String(progress.answers[q.id] ?? "").trim().slice(0, MAX_SHORT_CHARS) || null;
+      else respuestas[q.id] = progress.answers[q.id] ?? null;
+    }
     return {
       examId,
       nombre: who.nombre,
@@ -391,6 +525,8 @@ function renderExam(session) {
       grupo: who.grupo,
       code: who.code,
       respuestas,
+      abiertas,
+      pegados: progress.pegados,
       duracion_min: Math.round(((Date.now() - progress.startedAt) / 60000) * 100) / 100,
       salidas: progress.salidas,
       // Incluye el tiempo de una salida que todavía no ha terminado (el alumno envía sin haber vuelto).
@@ -455,8 +591,10 @@ function renderExam(session) {
 
     finished = true;
     clearInterval(watchTimer);
+    releaseScreen();
     store.remove(key);
     store.remove(lastKey());
+    rememberSend({ envioId: progress.envioId, nombre: who.nombre, apellidos: who.apellidos });
     showDone(res, motivo);
   }
 
@@ -543,39 +681,78 @@ function renderExam(session) {
 
   /*
    * ¿Sigue el alumno en la pantalla del examen? La decisión la toma js/watch.js a partir de varias señales
-   * (página oculta, foco, ventana reducida, pantalla completa, ratón). Aquí solo se recogen las señales.
+   * (página oculta, foco, ventana reducida, pantalla completa). Aquí solo se recogen las señales.
    */
   // En ordenadores salir de la pantalla completa (Esc) no es un gesto natural: margen más corto que en tabletas.
-  const watcher = createWatcher(window.matchMedia?.("(pointer: fine)").matches ? { grace: { fullscreenLost: 1500 } } : {});
+  // En el iPad, deslizar el dedo para desplazarse empezando cerca del borde activa a veces el gesto del sistema
+  // (Dock, multitarea, notificaciones) y la página se oculta un instante: se da un margen antes de contarlo.
+  // Tableta: el puntero principal es el dedo. El iPad también se reconoce cuando Safari se presenta como un Mac
+  // («sitio web de escritorio», activado por defecto en iPad): un «Mac» con pantalla táctil es un iPad.
+  // Los portátiles táctiles (puntero principal: ratón o panel) no cuentan como tableta.
+  const tablet =
+    (window.matchMedia?.("(pointer: coarse)").matches ?? false) ||
+    (/Macintosh/.test(navigator.userAgent) && (navigator.maxTouchPoints ?? 0) > 1);
+  const watcher = createWatcher(
+    tablet ? { grace: { hidden: 2000 } } : window.matchMedia?.("(pointer: fine)").matches ? { grace: { fullscreenLost: 1500 } } : {}
+  );
   let wasReduced = false;
   let blurred = false;
   let pageHidden = false;
-  let pointerOut = false;
   let focusSeen = false; // hasFocus() solo cuenta si alguna vez ha sido true
   let fullscreenSeen = false; // la pérdida de pantalla completa solo cuenta si estuvo en ella
   let watchTimer = null;
+  // Teclado en pantalla: al mostrarlo u ocultarlo (también con la tecla de ocultar teclado del iPad), Safari
+  // cambia el foco y el tamaño de la ventana durante la animación. Durante KEYBOARD_MS tras entrar o salir de un
+  // cuadro de texto, en tabletas solo cuenta la página oculta (cambiar de app sigue detectándose).
+  const KEYBOARD_MS = 3000;
+  let keyboardUntil = 0;
+  const isEditable = (el) => Boolean(el?.matches?.("textarea, input, [contenteditable]"));
 
   function collectInputs() {
-    const settling = Date.now() < quietUntil;
+    const now = Date.now();
+    const settling = now < quietUntil;
+    const keyboardMoving = tablet && now < keyboardUntil;
     if (document.hasFocus()) focusSeen = true;
     if (fsActive && fsElement()) fullscreenSeen = true;
     wasReduced = isReducedWindow({
-      innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight,
+      // Tamaño de la ventana sin contar el zoom: en el iPad, ampliar con dos dedos encoge innerWidth/innerHeight
+      // y se confundía con la pantalla dividida.
+      innerWidth: document.documentElement.clientWidth || window.innerWidth,
+      innerHeight: document.documentElement.clientHeight || window.innerHeight,
       screenWidth: window.screen?.width,
       screenHeight: window.screen?.height,
-      coarse: window.matchMedia?.("(pointer: coarse)").matches ?? false,
+      coarse: tablet,
+      typing: isEditable(document.activeElement),
       wasReduced,
     });
     return {
       hidden: document.hidden || pageHidden,
-      blurred,
-      noFocus: focusSeen && !document.hasFocus(),
-      pointerOut,
-      reduced: wasReduced && !settling,
+      blurred: blurred && !keyboardMoving,
+      // En tabletas document.hasFocus() puede quedarse en false tras ocultar el teclado aunque el alumno siga
+      // en el examen: allí no se usa (otra app se detecta por la página oculta o la ventana reducida).
+      noFocus: !tablet && focusSeen && !document.hasFocus(),
+      reduced: wasReduced && !settling && !keyboardMoving,
       fullscreenLost: fsActive && fullscreenSeen && !fsElement() && !settling,
       needsFullscreen: fsActive && !fsState.failed && !fsElement(),
     };
+  }
+
+  // Mientras el alumno lee o piensa sin tocar la pantalla, el iPad se bloquearía solo (página oculta = salida).
+  // Se pide al navegador que mantenga la pantalla encendida; el sistema la suelta al ocultarse la página,
+  // así que se vuelve a pedir al volver. Si el navegador no lo permite, se sigue sin ello.
+  let wakeLock = null;
+  async function keepScreenOn() {
+    if (finished || document.hidden || wakeLock || !navigator.wakeLock) return;
+    try {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } catch {
+      wakeLock = null;
+    }
+  }
+  function releaseScreen() {
+    wakeLock?.release().catch(() => {});
+    wakeLock = null;
   }
 
   function evaluateAway() {
@@ -588,7 +765,14 @@ function renderExam(session) {
 
   if (watched) {
     document.addEventListener("visibilitychange", evaluateAway);
-    window.addEventListener("blur", () => { blurred = true; evaluateAway(); });
+    window.addEventListener("blur", () => {
+      // En tabletas no se usa: Safari en iPad avisa de «blur» al ocultar el teclado y en otros gestos aunque el
+      // alumno siga en el examen, y a veces nunca avisa de «focus» al volver (salidas falsas «blurred»).
+      // Irse a otra app se detecta por la página oculta; la pantalla dividida, por el tamaño de la ventana.
+      if (tablet) return;
+      blurred = true;
+      evaluateAway();
+    });
     window.addEventListener("focus", () => { blurred = false; evaluateAway(); });
     window.addEventListener("pagehide", () => { pageHidden = true; evaluateAway(); });
     window.addEventListener("pageshow", () => { pageHidden = false; evaluateAway(); });
@@ -596,23 +780,39 @@ function renderExam(session) {
     window.addEventListener("orientationchange", evaluateAway);
     document.addEventListener("fullscreenchange", evaluateAway);
     document.addEventListener("webkitfullscreenchange", evaluateAway);
-    if (window.matchMedia?.("(pointer: fine)").matches) {
-      // Ordenador: el ratón que sale de la página (otra ventana, otro monitor) y no vuelve en 2 s.
-      document.documentElement.addEventListener("mouseleave", () => { pointerOut = true; });
-      document.documentElement.addEventListener("mouseenter", () => { pointerOut = false; evaluateAway(); });
+    // El teclado en pantalla aparece y desaparece al entrar o salir de un cuadro de texto.
+    const keyboardChange = (e) => {
+      if (isEditable(e.target)) keyboardUntil = Date.now() + KEYBOARD_MS;
+      setTimeout(evaluateAway, 0);
+    };
+    document.addEventListener("focusin", keyboardChange);
+    document.addEventListener("focusout", keyboardChange);
+    // Si el alumno está tocando o escribiendo en la página, la ventana es la activa aunque el navegador no haya
+    // avisado con «focus» (Safari no siempre lo hace al ocultar el teclado): se quita la marca de ventana sin foco.
+    for (const type of ["pointerdown", "touchstart", "keydown", "input"]) {
+      document.addEventListener(type, () => {
+        if (blurred) {
+          blurred = false;
+          evaluateAway();
+        }
+      }, { capture: true, passive: true });
     }
     // Un toque en cualquier parte devuelve la pantalla completa sin que el alumno tenga que buscar nada:
     // así los gestos naturales de la tableta que la quitan no cuestan una salida.
+    // Se usa pointerup: en pantallas táctiles el navegador solo permite pedir la pantalla completa al levantar
+    // el dedo. Al desplazarse con el dedo no llega pointerup (llega pointercancel), así que no molesta.
     document.addEventListener(
-      "pointerdown",
+      "pointerup",
       () => {
         if (fsActive && !fsElement() && !fsState.failed && (fullscreenSeen || !watcher.isArmed())) {
           quietUntil = Date.now() + QUIET_MS;
-          enterFullscreen();
+          enterFullscreen({ auto: true });
         }
       },
       true
     );
+    keepScreenOn();
+    document.addEventListener("visibilitychange", keepScreenOn);
     watchTimer = setInterval(evaluateAway, 500);
     evaluateAway(); // muestra la cubierta de preparación si todavía no está a pantalla completa
   }
@@ -625,6 +825,8 @@ function renderExam(session) {
     h("p", { class: "muted" }, `${who.nombre} ${who.apellidos} · ${who.grupo}`),
     watched ? h("p", { class: "muted small" }, "Examen vigilado: no salgas de esta pantalla. Las salidas quedan registradas y, si continúas, el examen se envía automáticamente.") : null,
     bar,
+    // Instrucciones del profesor, al principio del examen (texto plano, con sus saltos de línea).
+    exam.instrucciones ? h("div", { class: "notice info exam-instructions" }, h("p", {}, h("strong", {}, "Instrucciones")), h("p", {}, exam.instrucciones)) : null,
     fieldset,
     reviewBtn,
     h("p", { class: "muted small" }, "Tus respuestas se guardan automáticamente en este dispositivo."),
@@ -633,8 +835,12 @@ function renderExam(session) {
   );
   if (watched) {
     // Frena copiar, cortar, pegar, el menú contextual y seleccionar texto (disuasorio).
+    // Los cuadros de respuesta abierta se excluyen: ahí hay que poder escribir y colocar el cursor.
     for (const type of ["copy", "cut", "paste", "contextmenu", "selectstart", "dragstart"]) {
-      screen.addEventListener(type, (e) => e.preventDefault());
+      screen.addEventListener(type, (e) => {
+        if (e.target?.closest?.(".open-answer")) return;
+        e.preventDefault();
+      });
     }
   }
   render(screen);
@@ -674,13 +880,147 @@ function showDone(res, motivo = "manual") {
       motivo === "salida"
         ? h("div", { class: "notice warn" }, h("p", {}, "El examen se ha enviado automáticamente porque has salido de la pantalla del examen. Tu profesor lo verá registrado."))
         : null,
-      hasScore
+      res.abiertas > 0 && typeof res.puntos_test === "number"
+        ? [
+            h("p", { class: "muted" }, "Parte tipo test"),
+            h("div", { class: "big-result" }, `${formatNumber(res.puntos_test)} sobre ${formatNumber(res.puntos_test_max)} puntos`),
+            h("p", {}, `Aciertos: ${res.aciertos} · Errores: ${res.errores} · En blanco: ${res.blancos}`),
+            h("p", { class: "muted" }, "Las preguntas abiertas las corregirá tu profesor: tu nota final llegará cuando las revise."),
+          ]
+        : hasScore
         ? [
             h("p", { class: "muted" }, "Tu nota"),
             h("div", { class: "big-result" }, `${formatNumber(res.nota)} / 10`),
             h("p", {}, `Aciertos: ${res.aciertos} · Errores: ${res.errores} · En blanco: ${res.blancos}`),
           ]
-        : h("p", { class: "muted" }, "Tu profesor te comunicará la nota.")
+        : h("p", { class: "muted" }, "Tu profesor te comunicará la nota."),
+      h("p", { class: "muted small" }, "Cuando tu profesor publique la revisión, podrás ver tus fallos abriendo este mismo enlace en este dispositivo.")
+    )
+  );
+}
+
+/* ------------------------------- revisión -------------------------------- */
+
+// Si este dispositivo envió el examen y el profesor ha publicado la revisión, se muestra en lugar del examen.
+// Devuelve true si la ha mostrado. Ante cualquier error se sigue con la página normal.
+async function tryReview() {
+  const sent = loadJson(sentKey());
+  if (!Array.isArray(sent) || !sent.length) return false;
+  const found = [];
+  for (const entry of sent) {
+    if (typeof entry?.envioId !== "string") continue;
+    let res;
+    try {
+      res = await fetchReview(examId, entry.envioId);
+    } catch {
+      return false;
+    }
+    if (res.ok) found.push(res.review);
+    else if (res.error === "review_closed" || res.error === "not_found") return false; // vale para todos los envíos
+  }
+  if (!found.length) return false;
+  if (found.length === 1) showReview(found[0]);
+  else showReviewPicker(found);
+  return true;
+}
+
+// Dispositivo compartido: varios alumnos enviaron desde aquí; cada uno elige el suyo.
+function showReviewPicker(reviews) {
+  document.title = reviews[0].titulo;
+  render(
+    h(
+      "div",
+      { class: "card" },
+      h("h1", {}, reviews[0].titulo),
+      h("p", {}, "Desde este dispositivo se ha enviado el examen varias veces. Elige el tuyo:"),
+      h(
+        "div",
+        { class: "actions" },
+        reviews.map((r) => h("button", { type: "button", class: "btn secondary", onclick: () => showReview(r, () => showReviewPicker(reviews)) }, `${r.nombre} ${r.apellidos}`.trim()))
+      )
+    )
+  );
+}
+
+function showReview(r, onBack = null) {
+  document.title = `Revisión · ${r.titulo}`;
+  const pts = (v) => `${formatNumber(v)} ${v === 1 ? "punto" : "puntos"}`;
+  const cards = r.questions.map((q, i) => {
+    const legend = h("p", { class: "review-qtext" }, h("span", { class: "qnum" }, `${i + 1}.`), ...richNodes(q.text, r.imagenes));
+    if (q.tipo === "abierta") {
+      const pending = q.puntos === null || q.puntos === undefined;
+      return h(
+        "div",
+        { class: `card review-q ${pending ? "pending" : ""}` },
+        legend,
+        h("span", { class: `review-status ${pending ? "pending" : "ok"}` }, pending ? "Pendiente de corregir" : `${formatNumber(q.puntos)} de ${pts(q.valor)}`),
+        h("p", { class: "muted small" }, "Tu respuesta:"),
+        q.respuesta ? h("p", { class: "review-open" }, q.respuesta) : h("p", { class: "muted" }, "(en blanco)")
+      );
+    }
+    const state = q.respuesta === null ? "blank" : (q.tipo === "corta" ? q.acertada : q.respuesta === q.correcta) ? "ok" : "bad";
+    const label = { ok: "Correcta", bad: "Incorrecta", blank: "En blanco" }[state];
+    if (q.tipo === "corta") {
+      const accepted = q.correctas ?? [];
+      return h(
+        "div",
+        { class: `card review-q ${state}` },
+        legend,
+        h("span", { class: `review-status ${state}` }, label),
+        h("p", { class: "muted small" }, "Tu respuesta:"),
+        q.respuesta ? h("p", { class: `review-open${state === "ok" ? "" : " wrong"}` }, q.respuesta) : h("p", { class: "muted" }, "(en blanco)"),
+        state === "ok" ? null : h("p", { class: "muted small" }, accepted.length === 1 ? "Respuesta correcta:" : "Respuestas válidas:"),
+        state === "ok" ? null : h("p", { class: "review-open correct" }, accepted.join(" · "))
+      );
+    }
+    return h(
+      "div",
+      { class: `card review-q ${state}` },
+      legend,
+      h("span", { class: `review-status ${state}` }, label),
+      q.options.map((o, j) => {
+        const isCorrect = o.id === q.correcta;
+        const isMine = o.id === q.respuesta;
+        const cls = isCorrect ? "correct" : isMine ? "wrong" : "";
+        const tag = isCorrect && isMine ? "✓ Tu respuesta" : isCorrect ? "✓ Correcta" : isMine ? "✗ Tu respuesta" : "";
+        return h(
+          "div",
+          { class: `review-opt ${cls}` },
+          h("span", { class: "letter" }, "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[j]),
+          h("span", { class: "opt-text" }, o.text),
+          tag ? h("span", { class: "tag" }, tag) : null
+        );
+      })
+    );
+  });
+  const hasNote = typeof r.nota === "number";
+  const pendingOpen = r.questions.some((q) => q.tipo === "abierta" && (q.puntos === null || q.puntos === undefined));
+  render(
+    h(
+      "div",
+      {},
+      h(
+        "div",
+        { class: "card" },
+        h("h1", {}, `Revisión: ${r.titulo}`),
+        h("p", { class: "muted" }, `${r.nombre} ${r.apellidos}`.trim()),
+        hasNote
+          ? [
+              h("p", { class: "muted" }, pendingOpen ? "Nota provisional" : "Tu nota"),
+              h("div", { class: "big-result" }, `${formatNumber(r.nota)} / 10`),
+              pendingOpen ? h("p", { class: "muted small" }, "Faltan preguntas abiertas por corregir: tu nota cambiará cuando tu profesor las corrija.") : null,
+            ]
+          : null,
+        h(
+          "div",
+          { class: "review-summary" },
+          h("span", { class: "review-status ok" }, `Aciertos: ${r.aciertos}`),
+          h("span", { class: "review-status bad" }, `Errores: ${r.errores}`),
+          h("span", { class: "review-status blank" }, `En blanco: ${r.blancos}`)
+        ),
+        onBack ? h("div", { class: "actions" }, h("button", { type: "button", class: "btn secondary small", onclick: onBack }, "Volver")) : null
+      ),
+      cards
     )
   );
 }
@@ -691,6 +1031,7 @@ async function main() {
   if (!examId) {
     return showMessage("Falta el examen", "Este enlace no es correcto. Pide a tu profesor el enlace del examen.", "warn");
   }
+  if (await tryReview()) return;
   try {
     const res = await fetchExam(examId);
     if (res.ok) {

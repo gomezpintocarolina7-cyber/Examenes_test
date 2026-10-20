@@ -1,8 +1,29 @@
-// Parser de un subconjunto de GIFT: opción múltiple con una única respuesta correcta.
-// Función pura: no toca el DOM ni la red. Se usa en el panel del profesor.
+// Parser de un subconjunto de GIFT: opción múltiple con una única respuesta correcta, respuesta corta
+// ({=NaCl =ClNa}: solo respuestas aceptadas, sin ~) y abierta ({}). Función pura: no toca el DOM ni la red. Se usa en el panel del profesor.
+
+import { MAX_SHORT_ANSWERS, MAX_SHORT_CHARS } from "./short.js";
 
 const ESCAPABLE = new Set([":", "=", "~", "#", "{", "}", "\\"]);
 const LETTERS = "abcdefghijklmnopqrstuvwxyz";
+export const MAX_VALUE = 100;
+
+// [valor=2] al principio del enunciado: lo que vale la pregunta. También [puntos=2] o [valor: 1/2].
+const VALUE_MARK = /^\[\s*(?:valor|puntos)\s*[=:]\s*([^\]]*?)\s*\]\s*/i;
+
+/** "2", "0,5", "0.5" o "1/2" -> número mayor que 0; lanza un error si no es válido. */
+export function parseValue(raw, n) {
+  const text = String(raw ?? "").trim().replace(",", ".");
+  let value = NaN;
+  const frac = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(text);
+  if (frac) value = Number(frac[1]) / Number(frac[2]);
+  else if (/^\d+(?:\.\d+)?$/.test(text)) value = Number(text);
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_VALUE) {
+    throw new Error(
+      `Pregunta ${n}: el valor «${String(raw).trim()}» no es válido; usa un número mayor que 0 y como mucho ${MAX_VALUE}, por ejemplo [valor=2] o [valor=0,5].`
+    );
+  }
+  return Math.round(value * 10000) / 10000;
+}
 
 export class GiftError extends Error {
   constructor(errors) {
@@ -112,12 +133,35 @@ function parseBlock(block, n) {
     throw new Error(`Pregunta ${n}: falta la llave de cierre }.`);
   }
 
-  const before = rest.slice(0, open).trim();
+  let before = rest.slice(0, open).trim();
   const after = rest.slice(close + 1).trim();
+  let valor = 1;
+  const mark = VALUE_MARK.exec(before);
+  if (mark) {
+    valor = parseValue(mark[1], n);
+    before = before.slice(mark[0].length).trim();
+  }
   const text = unescapeGift([before, after].filter(Boolean).join(" ").trim());
   if (!text) throw new Error(`Pregunta ${n}: el enunciado está vacío.`);
 
+  // Llaves vacías = pregunta abierta (el alumno escribe la respuesta y la corrige el profesor).
+  if (rest.slice(open + 1, close).trim() === "") {
+    return { id: `q${n}`, title, text, options: [], correct: null, valor, tipo: "abierta" };
+  }
+
   const parts = splitOptions(rest.slice(open + 1, close));
+  // Solo respuestas con = (ninguna ~): respuesta corta, se corrige sola comparando con las aceptadas.
+  if (parts.length && parts.every((p) => p.correct)) {
+    const respuestas = [...new Set(parts.map((p) => parseOption(p).text))];
+    if (respuestas.some((r) => !r)) throw new Error(`Pregunta ${n}: hay una respuesta aceptada vacía.`);
+    if (respuestas.length > MAX_SHORT_ANSWERS) {
+      throw new Error(`Pregunta ${n}: demasiadas respuestas aceptadas (máximo ${MAX_SHORT_ANSWERS}).`);
+    }
+    if (respuestas.some((r) => r.length > MAX_SHORT_CHARS)) {
+      throw new Error(`Pregunta ${n}: una respuesta aceptada supera los ${MAX_SHORT_CHARS} caracteres.`);
+    }
+    return { id: `q${n}`, title, text, options: [], correct: null, respuestas, valor, tipo: "corta" };
+  }
   if (parts.length < 2) {
     throw new Error(`Pregunta ${n}: necesita al menos 2 opciones (tiene ${parts.length}).`);
   }
@@ -139,13 +183,13 @@ function parseBlock(block, n) {
 
   const options = parsed.map((o, i) => ({ id: LETTERS[i], text: o.text }));
   const correct = options[parsed.findIndex((o) => o.correct)].id;
-  return { id: `q${n}`, title, text, options, correct };
+  return { id: `q${n}`, title, text, options, correct, valor, tipo: "test" };
 }
 
 /**
  * Convierte texto GIFT en preguntas.
  * @param {string} input
- * @returns {{id:string,title:string,text:string,options:{id:string,text:string}[],correct:string}[]}
+ * @returns {{id:string,title:string,text:string,options:{id:string,text:string}[],correct:string|null,respuestas?:string[],valor:number,tipo:"test"|"corta"|"abierta"}[]}
  * @throws {GiftError} con `.errors` (una entrada por pregunta defectuosa, con su número).
  */
 export function parseGift(input) {

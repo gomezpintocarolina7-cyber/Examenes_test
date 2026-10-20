@@ -82,6 +82,8 @@ h2 { font-size: 1.2rem; margin: 0 0 8px; }
   border-radius: 8px;
 }
 .field textarea { min-height: 160px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.9rem; }
+.field textarea.plain { min-height: 110px; font: inherit; }
+.exam-instructions p { white-space: pre-wrap; }
 .field .hint { display: block; font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
 .field .err { display: block; font-size: 0.9rem; color: var(--danger); margin-top: 4px; }
 .check { display: flex; align-items: center; gap: 10px; min-height: 44px; margin: 0 0 6px; }
@@ -148,6 +150,31 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 .status { position: sticky; bottom: 0; margin: 0 -16px; padding: 12px 16px; background: var(--surface); border-top: 1px solid var(--border); }
 .big-result { font-size: 2.4rem; font-weight: 700; margin: 8px 0; }
 
+/* Revisión del examen (alumno) */
+.review-qtext { margin: 0 0 10px; font-weight: 600; white-space: pre-line; }
+.review-qtext .qnum { color: var(--muted); font-weight: 700; margin-right: 6px; }
+.review-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; }
+.review-q.ok { border-left: 6px solid var(--ok); }
+.review-q.bad { border-left: 6px solid var(--danger); }
+.review-q.blank, .review-q.pending { border-left: 6px solid var(--warn); }
+.review-status { display: inline-block; margin: 0 0 10px; padding: 2px 10px; font-size: 0.85rem; font-weight: 700; border-radius: 999px; }
+.review-status.ok { background: var(--ok-soft); color: var(--ok); }
+.review-status.bad { background: var(--danger-soft); color: var(--danger); }
+.review-status.blank, .review-status.pending { background: var(--warn-soft); color: var(--warn); }
+.review-opt { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 8px; padding: 10px 14px; border: 2px solid var(--border); border-radius: 10px; background: var(--surface); }
+.review-opt .letter { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--border); font-weight: 700; font-size: 0.9rem; }
+.review-opt .opt-text { flex: 1; }
+.review-opt .tag { flex: none; font-size: 0.8rem; font-weight: 700; }
+.review-opt.correct { border-color: var(--ok); background: var(--ok-soft); }
+.review-opt.correct .letter { border-color: var(--ok); background: var(--ok); color: var(--surface); }
+.review-opt.correct .tag { color: var(--ok); }
+.review-opt.wrong { border-color: var(--danger); background: var(--danger-soft); }
+.review-opt.wrong .letter { border-color: var(--danger); background: var(--danger); color: var(--surface); }
+.review-opt.wrong .tag { color: var(--danger); }
+.review-open { margin: 0; padding: 10px 12px; white-space: pre-wrap; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.review-open.wrong { border-color: var(--danger); background: var(--danger-soft); }
+.review-open.correct { border-color: var(--ok); background: var(--ok-soft); font-weight: 600; }
+
 /* Panel del profesor */
 .q-preview { margin: 0 0 12px; padding: 0 0 12px; border-bottom: 1px solid var(--border); }
 .q-preview:last-child { border-bottom: 0; }
@@ -200,3 +227,39 @@ dialog.warning h2 { color: var(--danger); }
 .img-row { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
 .img-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: #fff; flex: none; }
 .img-thumb.empty { display: inline-flex; align-items: center; justify-content: center; color: var(--muted); }
+
+/* Respuesta abierta */
+.open-box { margin-top: 10px; }
+.short-answer.open-answer { min-height: 0; max-width: 420px; font-size: 1.1rem; resize: none; }
+.open-answer { width: 100%; min-height: 140px; padding: 10px 12px; font: inherit; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--bg); resize: vertical; -webkit-user-select: text; user-select: text; }
+.points-badge { display: inline-block; margin-left: 8px; padding: 1px 8px; font-size: 0.8rem; font-weight: 600; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; white-space: nowrap; vertical-align: middle; }
+
+/* Pantalla de corrección */
+.q-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 2px 12px; }
+.q-tab { flex: 0 0 auto; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 8px 14px; min-height: 48px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.q-tab small { color: var(--muted); }
+.q-tab.active { background: var(--primary); border-color: var(--primary); color: var(--primary-text); }
+.q-tab.active small { color: inherit; opacity: 0.85; }
+.q-tab.complete:not(.active) { border-color: var(--ok); background: var(--ok-soft); }
+.q-head .q-text { font-size: 1.05rem; }
+.progress { height: 10px; background: var(--border); border-radius: 999px; overflow: hidden; }
+.progress-bar { height: 100%; background: var(--ok); border-radius: 999px; transition: width 0.25s; }
+.answer-card { margin: 0 0 12px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-left: 6px solid var(--warn); border-radius: var(--radius); box-shadow: var(--shadow); }
+.answer-card.graded { border-left-color: var(--ok); }
+.answer-card.wrong { border-left-color: var(--danger); }
+.answer-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; }
+.answer-text { padding: 12px 14px; font-size: 1.02rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; max-height: 420px; overflow: auto; }
+.answer-text.empty { color: var(--muted); font-style: italic; }
+.grade-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
+.grade-row label { display: flex; align-items: center; gap: 8px; }
+.grade-row input { width: 92px; min-height: 44px; padding: 6px 10px; font: inherit; font-weight: 700; text-align: center; color: var(--text); background: var(--surface); border: 2px solid var(--border); border-radius: 8px; }
+.grade-row input:focus { border-color: var(--primary); outline: none; }
+.save-state.ok { color: var(--ok); }
+.save-state.bad { color: var(--danger); font-weight: 700; }
+.badge.off-soft { background: var(--primary-soft); color: var(--primary); }
+.badge.warn-badge { background: var(--warn-soft); color: var(--warn); }
+.top-bar .actions { align-items: center; }
+
+/* Lista de exámenes del panel */
+.exam-item { margin: 0 0 12px; padding: 14px 16px; background: var(--surface); border: 1px solid var(--border); border-left: 6px solid var(--primary); border-radius: var(--radius); box-shadow: var(--shadow); }
+.exam-item:last-child { border-bottom: 1px solid var(--border); }

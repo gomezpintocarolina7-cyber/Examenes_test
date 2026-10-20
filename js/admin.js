@@ -3,10 +3,12 @@ import { apiGet, apiPost, NetworkError, ConfigError } from "./api.js";
 import { parseGift, GiftError } from "./gift.js";
 import { h } from "./dom.js";
 import { studentLink, randomCode, formatNumber } from "./util.js";
-import { parsePenalty } from "./grading.js";
+import { parsePenalty, questionValue, isOpenQuestion, isShortQuestion } from "./grading.js";
 import { collectImageRefs, matchImage, MAX_IMAGES, MAX_TOTAL_IMAGE_CHARS } from "./images.js";
 import { prepareImage } from "./image-encode.js";
 import { richNodes } from "./rich.js";
+import { caseMatters } from "./short.js";
+import { showCorrection, exportNotes } from "./correction.js";
 
 const TOKEN_KEY = "admin_token";
 const WARN_CHARS = 45000;
@@ -41,6 +43,15 @@ function errorText(e) {
   return "Ha ocurrido un error inesperado.";
 }
 
+// Para la vista previa: si en las respuestas aceptadas cuentan las mayúsculas (fórmulas como NaCl) o no.
+function caseNote(answers) {
+  const strict = answers.filter(caseMatters);
+  if (!strict.length) return " (dan igual las mayúsculas; las tildes cuentan)";
+  if (strict.length === answers.length) return " (cuentan las mayúsculas de símbolos, fórmulas y números romanos, y las tildes)";
+  return ` (cuentan las tildes, y las mayúsculas en ${strict.join(", ")})`;
+}
+
+const MAX_INSTRUCTIONS = 2000;
 const notice = (kind, text) => h("div", { class: `notice ${kind}`, role: kind === "error" ? "alert" : null }, h("p", {}, text));
 
 async function copyText(text, button) {
@@ -176,12 +187,47 @@ function showPanel(initialExams) {
           }
           refreshList();
         });
+        // Revisión: con ella, cada alumno ve sus fallos y las respuestas correctas al abrir el enlace en su dispositivo.
+        // Un Code.gs anterior no devuelve `revision`: entonces no se ofrece.
+        const reviewToggle =
+          typeof ex.revision === "boolean"
+            ? h("button", { class: "btn secondary small", type: "button" }, ex.revision ? "Ocultar revisión" : "Publicar revisión")
+            : null;
+        reviewToggle?.addEventListener("click", async () => {
+          if (
+            !ex.revision &&
+            ex.activo &&
+            !confirm("El examen sigue abierto: quien todavía no lo haya hecho podría ver las soluciones a través de un compañero. ¿Publicar la revisión igualmente?")
+          ) {
+            return;
+          }
+          reviewToggle.disabled = true;
+          try {
+            const res = await apiPost({ action: "setReview", token, id: ex.id, revision: !ex.revision });
+            if (res.error === "unauthorized") return onUnauthorized();
+            if (!res.ok) alert(res.message);
+          } catch (e) {
+            alert(errorText(e));
+          }
+          refreshList();
+        });
         const copy = h("button", { class: "btn secondary small", type: "button" }, "Copiar enlace");
         copy.addEventListener("click", () => copyText(link, copy));
+        const exportBtn = h("button", { class: "btn secondary small", type: "button" }, "Exportar notas (CSV)");
+        exportBtn.addEventListener("click", async () => {
+          exportBtn.disabled = true;
+          try {
+            const err = await exportNotes(token, ex);
+            if (err) alert(err);
+          } catch (e) {
+            alert(errorText(e));
+          }
+          exportBtn.disabled = false;
+        });
         return h(
           "div",
           { class: "exam-item" },
-          h("h3", {}, ex.titulo, " ", h("span", { class: `badge ${ex.activo ? "on" : "off"}` }, ex.activo ? "Abierto" : "Cerrado"), ex.control_salidas ? " " : null, ex.control_salidas ? h("span", { class: "badge on" }, `Vigilado · ${ex.salidas_permitidas ?? 3} salidas${ex.pantalla_completa ? " · pantalla completa" : ""}`) : null),
+          h("h3", {}, ex.titulo, " ", h("span", { class: `badge ${ex.activo ? "on" : "off"}` }, ex.activo ? "Abierto" : "Cerrado"), ex.control_salidas ? " " : null, ex.control_salidas ? h("span", { class: "badge on" }, `Vigilado · ${ex.salidas_permitidas ?? 3} salidas${ex.pantalla_completa ? " · pantalla completa" : ""}`) : null, ex.revision ? " " : null, ex.revision ? h("span", { class: "badge on" }, "Revisión publicada") : null),
           h(
             "p",
             { class: "muted small meta" },
@@ -195,7 +241,18 @@ function showPanel(initialExams) {
               .filter(Boolean)
               .join(" · ")
           ),
-          h("div", { class: "actions" }, toggle, copy, h("a", { class: "btn secondary small", href: ex.results_url, target: "_blank", rel: "noopener" }, "Ver resultados"))
+          h(
+            "div",
+            { class: "actions" },
+            ex.n_abiertas || ex.n_cortas
+              ? h("button", { class: "btn small", type: "button", onclick: () => showCorrection(app, { token, ex, onBack: main, onUnauthorized }) }, ex.n_abiertas ? "Corregir abiertas" : "Revisar respuestas cortas")
+              : null,
+            exportBtn,
+            toggle,
+            reviewToggle,
+            copy,
+            h("a", { class: "btn secondary small", href: ex.results_url, target: "_blank", rel: "noopener" }, "Ver hoja de Google")
+          )
         );
       })
     );
@@ -222,6 +279,7 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
   const grupo = h("input", { name: "grupo", maxlength: 60 });
   const tiempo = h("input", { name: "tiempo", type: "number", min: 0, step: 1, value: 0, inputmode: "numeric" });
   const codigo = h("input", { name: "codigo", maxlength: 40, autocomplete: "off" });
+  const instrucciones = h("textarea", { name: "instrucciones", class: "plain", maxlength: MAX_INSTRUCTIONS, rows: 5, placeholder: "Por ejemplo: escribe los números romanos con letras mayúsculas (I, V, X)…" });
   const genCode = h("button", { class: "btn secondary small", type: "button", onclick: () => (codigo.value = randomCode()) }, "Generar código");
   const check = (label, checked) => {
     const input = h("input", { type: "checkbox", checked });
@@ -313,8 +371,22 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
     imageRefs = collectImageRefs(questions);
     const size = JSON.stringify(questions).length;
     tooBig = size > MAX_CHARS;
+    const nOpen = questions.filter(isOpenQuestion).length;
+    const pts = (list) => formatNumber(list.reduce((sum, q) => sum + questionValue(q), 0));
+    const tests = questions.filter((q) => !isOpenQuestion(q) && !isShortQuestion(q));
+    const shorts = questions.filter(isShortQuestion);
     preview.append(
       h("p", {}, h("strong", {}, `${questions.length} preguntas`), ` · ${size.toLocaleString("es-ES")} de 50 000 caracteres`),
+      // Reparto de puntos: la nota final siempre es sobre 10 (puntos obtenidos / puntos totales × 10).
+      h(
+        "div",
+        { class: "notice info" },
+        h("p", {}, h("strong", {}, "Reparto de puntos")),
+        h("p", {}, `Test: ${tests.length} ${tests.length === 1 ? "pregunta" : "preguntas"} · ${pts(tests)} puntos.`),
+        shorts.length ? h("p", {}, `Respuesta corta: ${shorts.length} ${shorts.length === 1 ? "pregunta" : "preguntas"} · ${pts(shorts)} puntos (se corrigen solas; los errores no restan).`) : null,
+        nOpen ? h("p", {}, `Abiertas: ${nOpen} ${nOpen === 1 ? "pregunta" : "preguntas"} · ${pts(questions.filter(isOpenQuestion))} puntos (las corriges tú en la hoja de Google).`) : null,
+        h("p", {}, `Total: ${pts(questions)} puntos → la nota se calcula sobre 10.`)
+      ),
       tooBig ? notice("error", "El examen es demasiado grande para una celda de Google Sheets. Divídelo en dos exámenes.") : size > WARN_CHARS ? notice("warn", "El examen está cerca del límite de tamaño de una celda de Google Sheets.") : null,
       h(
         "div",
@@ -323,8 +395,12 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
           h(
             "div",
             { class: "q-preview" },
-            h("div", { class: "q-text" }, h("strong", {}, `${i + 1}. `, q.title ? `[${q.title}] ` : ""), ...richNodes(q.text, imageMap())),
-            h("ol", {}, q.options.map((o) => h("li", { class: o.id === q.correct ? "correct" : null }, o.text, o.id === q.correct ? " ✓" : "")))
+            h("div", { class: "q-text" }, h("strong", {}, `${i + 1}. `, q.title ? `[${q.title}] ` : ""), ...richNodes(q.text, imageMap()), h("span", { class: "points-badge" }, `${formatNumber(questionValue(q))} ${questionValue(q) === 1 ? "punto" : "puntos"}${isOpenQuestion(q) ? " · abierta" : isShortQuestion(q) ? " · respuesta corta" : ""}`)),
+            isOpenQuestion(q)
+              ? h("p", { class: "muted small" }, "Respuesta abierta: el alumno escribe en un cuadro de texto.")
+              : isShortQuestion(q)
+                ? h("p", { class: "small" }, `Respuesta corta. ${q.respuestas.length === 1 ? "Válida" : "Válidas"}: `, h("strong", { class: "correct" }, q.respuestas.join(" · ")), caseNote(q.respuestas))
+                : h("ol", {}, q.options.map((o) => h("li", { class: o.id === q.correct ? "correct" : null }, o.text, o.id === q.correct ? " ✓" : "")))
           )
         )
       )
@@ -429,6 +505,7 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
     h("label", { class: "field" }, h("span", {}, "Título"), titulo),
     h("div", { class: "row2" }, h("label", { class: "field" }, h("span", {}, "Grupo (opcional)"), grupo), h("label", { class: "field" }, h("span", {}, "Tiempo en minutos (0 = sin límite)"), tiempo)),
     h("label", { class: "field" }, h("span", {}, "Código de acceso (opcional)"), codigo, h("div", { style: "margin-top:6px" }, genCode)),
+    h("label", { class: "field" }, h("span", {}, "Instrucciones para el alumno (opcional)"), instrucciones, h("small", { class: "hint" }, "Se muestran al principio del examen, encima de la primera pregunta, cuando el alumno ya ha empezado.")),
     h("label", { class: "field" }, h("span", {}, "Penalización por cada error"), penaltySelect, customRow, penaltyExample),
     barPreg.node,
     barOpc.node,
@@ -460,11 +537,17 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
     publish.disabled = true;
     publish.textContent = "Publicando…";
     try {
-      if (imagenes.length) {
-        // Un Code.gs anterior ignoraría las imágenes y el examen saldría roto: se comprueba antes de publicar.
+      // Un Code.gs anterior ignoraría imágenes, valores o preguntas abiertas y el examen saldría roto: se comprueba antes.
+      const needs = [];
+      if (imagenes.length) needs.push(["imagenes", "guardar imágenes"]);
+      if (questions.some((q) => isOpenQuestion(q) || questionValue(q) !== 1)) needs.push(["abiertas", "usar preguntas abiertas ni puntos por pregunta"]);
+      if (questions.some(isShortQuestion)) needs.push(["cortas", "corregir preguntas de respuesta corta"]);
+      if (instrucciones.value.trim()) needs.push(["instrucciones", "mostrar instrucciones al alumno"]);
+      if (needs.length) {
         const v = await apiGet({ action: "version" });
-        if (!v.ok || !Array.isArray(v.funciones) || !v.funciones.includes("imagenes")) {
-          msg.append(notice("error", "El script de Google no está actualizado y no sabe guardar imágenes. Actualiza Code.gs en Apps Script (Nueva versión) y vuelve a publicar."));
+        const missing = needs.find(([f]) => !v.ok || !Array.isArray(v.funciones) || !v.funciones.includes(f));
+        if (missing) {
+          msg.append(notice("error", `El script de Google no está actualizado y no sabe ${missing[1]}. Actualiza Code.gs en Apps Script (Nueva versión) y vuelve a publicar.`));
           publish.disabled = false;
           return;
         }
@@ -476,6 +559,7 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
         grupo_destino: grupo.value.trim(),
         tiempo_min: Number(tiempo.value) || 0,
         codigo_acceso: codigo.value.trim(),
+        instrucciones: instrucciones.value.trim(),
         barajar_preguntas: barPreg.input.checked,
         barajar_opciones: barOpc.input.checked,
         mostrar_nota: mostrar.input.checked,

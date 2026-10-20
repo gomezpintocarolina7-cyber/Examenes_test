@@ -93,6 +93,121 @@ Escribe las preguntas en un archivo de texto con este formato (la respuesta corr
 
 **Guarda estos archivos fuera del repositorio** (llevan las soluciones). El `.gitignore` bloquea `*.gift` y `*.txt`, pero lo más seguro es no ponerlos nunca en la carpeta del proyecto.
 
+### Puntos por pregunta, preguntas abiertas y de respuesta corta
+
+**Cuántos puntos vale cada pregunta.** Se escribe en el propio GIFT con la marca `[valor=N]` **al principio del enunciado** (justo después del título `::…::`, si lo hay). Si no la pones, la pregunta vale **1**. Acepta enteros y decimales (`2`, `0,5`, `0.5`, `1/2`), mayores que 0 y como mucho 100. También vale `[puntos=N]`.
+
+```
+::P01::[valor=2] ¿Cuánto es 2 + 2?{
+~3
+=4
+~5
+}
+```
+
+**Preguntas abiertas.** Una pregunta con las llaves **vacías** `{}` es abierta: al alumno se le muestra un cuadro de texto (hasta 4 000 caracteres) donde escribe su respuesta. En ese cuadro **no se puede pegar, copiar, cortar ni arrastrar texto**; cada intento de pegar queda contado en la columna `pegados` de la hoja. (Nadie puede impedir que alguien teclee algo que lee en otro dispositivo: el control real es que el examen esté vigilado y que corrijas tú.)
+
+```
+::A01::[valor=3] Explica con tus palabras qué es el método científico.{}
+```
+
+**Cómo se reparte la nota.** La nota final siempre es **sobre 10**: `nota = puntos obtenidos / suma de los valores de TODAS las preguntas × 10`. Por ejemplo, 20 preguntas de test a 0,4 puntos y 2 abiertas de 1 punto suman 10 puntos en total; no hace falta que los valores sumen 10, la aplicación proporciona. En el panel, al cargar el GIFT, aparece el **reparto de puntos** (test, abiertas, total) y cada pregunta lleva su valor.
+
+**La penalización escala con el valor**: un error en una pregunta de 2 puntos resta el doble que en una de 1 (con la penalización 1/3, resta 2/3 de punto).
+
+**Preguntas de respuesta corta (se corrigen solas).** Para preguntas cuya respuesta es una palabra, un número o una fórmula, escribe dentro de las llaves **solo respuestas con `=`** (ninguna `~`). El alumno ve un cuadro de una línea y el servidor compara lo que escribe con las respuestas aceptadas; puedes poner varias si hay más de una forma válida:
+
+```
+::C01::[valor=0,5] Escribe la fórmula del cloruro de sodio.{=NaCl}
+
+::C02::¿Cómo se llama el compuesto NaCl?{=cloruro de sodio =cloruro sódico}
+
+::C03::¿Cuántos gramos hay en 0,5 kg?{=500}
+```
+
+Cómo se compara (para que no haga falta prever cada variante):
+
+- **La ortografía cuenta, tildes incluidas**: «cloruro sodico» no vale por `cloruro sódico`. Al alumno se le avisa en la pantalla inicial y debajo de cada cuadro. Lo que no cuenta son los espacios de más ni un punto final: «Cloruro sódico.» vale. Si la respuesta no tiene espacios, tampoco cuentan los del alumno: «Na Cl» vale por `NaCl`.
+- **Mayúsculas:** se miran por partes. En las palabras normales escritas en minúsculas, o con solo la inicial en mayúscula (`óxido`, `Oxígeno`, `Ley de Ohm`), dan igual. En los símbolos, fórmulas y números romanos (`NaCl`, `CO2`, `H2O`, `Fe`, `pH`, `(III)`) **tienen que coincidir**: «nacl» es incorrecto, «Co» (cobalto) no vale por `CO` y «óxido de hierro(iii)» no vale por `óxido de hierro(III)`; en cambio «Óxido de hierro(III)» sí vale. La vista previa del panel te dice, en cada pregunta, dónde cuentan las mayúsculas.
+- Da igual dejar o no un espacio junto a los paréntesis: «hierro (III)» vale por `hierro(III)`.
+- Los subíndices cuentan como números normales (`H₂O` = `H2O`) y en los números da igual la coma o el punto (`0,5` = `0.5`).
+- Para escribir `=`, `~`, `#`, `{` o `}` dentro de una respuesta aceptada, ponle delante una barra invertida (`v\=d/t`).
+
+Cuentan como las de test (acierto, error o en blanco) y suman sus puntos, pero **un error no resta**: escribiendo al azar no se acierta.
+
+**Cambiar la corrección a mano.** Llegan ya corregidas, pero puedes cambiarlas: en «Mis exámenes», el botón **Revisar respuestas cortas** (o **Corregir abiertas**, si el examen también tiene abiertas) muestra cada pregunta de respuesta corta con lo que ha escrito cada alumno, marcado como «Correcta · automática» o «Incorrecta · automática». Si un alumno escribió algo válido que no habías previsto (por ejemplo «ClNa»), pulsa **✓ Correcta**, y si quieres dar por mala una que la máquina aceptó, **✗ Incorrecta**: la nota del alumno, sus aciertos y errores se recalculan al momento en la hoja y en la revisión. Volver a pulsar lo que diría la corrección automática la deja como automática. «Mostrar solo las incorrectas» te enseña solo las que conviene mirar. Las correcciones a mano se guardan en la columna oculta `cortas_manual` de la hoja.
+
+En la revisión, el alumno ve lo que escribió y, si falló, la respuesta correcta. En ese cuadro tampoco se puede pegar texto. Requiere `Code.gs` actualizado; si no lo está, el panel lo detecta y **no publica** el examen.
+
+**Instrucciones para el alumno.** Al publicar puedes escribir unas instrucciones (hasta 2 000 caracteres, con saltos de línea) en «Instrucciones para el alumno». Se muestran en un recuadro al principio del examen, encima de la primera pregunta, cuando el alumno ya ha empezado. Son útiles con las preguntas de respuesta corta para explicar cómo escribir las respuestas (números romanos en mayúsculas, subíndices como números normales…). Se guardan en la columna `instrucciones` de la pestaña `Examenes`. Requiere `Code.gs` actualizado.
+
+**Corregir las abiertas (en el panel, no en la hoja).** En «Mis exámenes», el examen con preguntas abiertas tiene el botón **Corregir abiertas** (en la misma pantalla están también las de respuesta corta, detrás de las abiertas). Se corrige **pregunta por pregunta**: arriba eliges la pregunta (con cuántas llevas corregidas), y debajo ves la respuesta de cada alumno en una caja grande y legible, con su grupo y, si los hubo, los intentos de pegar. Escribes los puntos (de 0 al máximo; acepta coma decimal) o pulsas **0**, **½** o **Máximo**, y se guardan solos al pulsar Intro o salir del campo; Intro salta al siguiente alumno. «Mostrar solo las sin corregir» te deja ver lo que falta.
+
+La hoja de Google guarda los puntos, y la **nota final** de cada alumno (columna `nota`) se actualiza sola: test + puntos de las abiertas, sobre 10. Mientras no corrijas, `nota` es solo la del test y la columna `pendientes` sale en ámbar.
+
+**Revisión para los alumnos (ver sus fallos).** Cuando todos hayan hecho el examen, pulsa **Publicar revisión** en «Mis exámenes». A partir de ese momento, cada alumno que abra **el mismo enlace del examen en el mismo dispositivo** desde el que lo envió ve su revisión: su nota, cada pregunta marcada como correcta, incorrecta o en blanco, su respuesta y la correcta, y en las abiertas lo que escribió y los puntos que le has puesto (o «pendiente de corregir»). Funciona aunque hayas cerrado el examen, y puedes volver a ocultarla con **Ocultar revisión**.
+
+- Cada alumno solo ve **su propio** examen: el dispositivo guarda un identificador aleatorio de su envío y sin él no hay revisión.
+- Si el examen sigue abierto, el panel te pide confirmación: quien aún no lo haya hecho podría ver las soluciones a través de un compañero.
+- En un dispositivo compartido, el alumno elige su nombre de la lista de envíos hechos desde ese dispositivo.
+- Si el alumno borra los datos del navegador o usa otro dispositivo, no puede ver la revisión.
+- Solo vale para envíos hechos con esta versión: los exámenes entregados antes no guardaron el identificador en el dispositivo.
+- Requiere `Code.gs` actualizado; si no lo está, el botón no aparece.
+
+**Exportar las notas.** El botón **Exportar notas (CSV)** de cada examen descarga una tabla limpia (apellidos, nombre, grupo, nota final, aciertos, errores, en blanco, salidas, segundos fuera, intentos de pegar), ordenada por apellidos y lista para abrir en Excel en español (separador `;`, decimales con coma).
+
+**Qué ve el alumno.** Solo la parte del test: «Parte tipo test: X sobre Y puntos» y el aviso de que las abiertas las corrige el profesor. Si quitas «Mostrar la nota al alumno», no ve nada.
+
+Requiere `Code.gs` actualizado; si no lo está, el panel lo detecta y **no publica** el examen.
+
+### Generar el GIFT con una IA
+
+Si vas a pedirle el GIFT a una IA (ChatGPT, Claude, etc.), **pégale este bloque** antes de tus apuntes y añade al final los puntos que quieres. Así el resultado funciona a la primera:
+
+````text
+Genera preguntas en formato GIFT para mi aplicación de exámenes. Devuelve SOLO el texto GIFT dentro de un único bloque de código, sin explicaciones.
+
+REGLAS DEL FORMATO (obligatorias):
+1. Una pregunta por bloque; separa los bloques con UNA línea en blanco.
+2. Estructura de una pregunta de TEST:
+   ::P01::[valor=N] Enunciado de la pregunta{
+   =Opción correcta
+   ~Opción incorrecta
+   ~Opción incorrecta
+   ~Opción incorrecta
+   }
+3. Cada pregunta de test tiene EXACTAMENTE UNA opción correcta (=) y entre 2 y 6 opciones (preferible 4). Nada de varias correctas, verdadero/falso con %pesos%, huecos ni emparejamientos.
+4. Varía la posición de la opción correcta (no la pongas siempre la primera). La opción correcta NO debe ser la más larga ni la más detallada: escribe las incorrectas con una longitud parecida (o más largas), con detalles creíbles pero falsos, para que la longitud no delate la respuesta.
+5. No pongas feedback (#...), ni pesos (%50%), ni categorías ($CATEGORY), ni formato [html]/[markdown].
+6. PUNTOS: la marca [valor=N] va al PRINCIPIO del enunciado, justo después del título ::Pxx::. N es un número mayor que 0 (usa punto o coma decimal: 1, 2, 0.5). Si una pregunta vale 1 punto puedes omitirla.
+7. PREGUNTAS ABIERTAS (respuesta escrita por el alumno): llaves VACÍAS, sin opciones. Ejemplo:
+   ::A01::[valor=3] Explica con tus palabras qué es el método científico.{}
+   PREGUNTAS DE RESPUESTA CORTA (una palabra, número o fórmula que se corrige sola): dentro de las llaves SOLO respuestas aceptadas con =, sin ninguna ~, en una línea. Pon todas las formas válidas. Escribe las palabras en minúsculas y con su ortografía correcta (tildes incluidas), y las fórmulas con sus mayúsculas exactas. Ejemplos:
+   ::C01::Escribe la fórmula del cloruro de sodio.{=NaCl}
+   ::C02::¿Cómo se llama el compuesto NaCl?{=cloruro de sodio =cloruro sódico}
+8. Para escribir los caracteres : = ~ # { } dentro de un texto, ponles delante una barra invertida (\= \{ \}...). Evita fórmulas en LaTeX; escribe las fórmulas con texto simple (v = d/t, 3x^2).
+9. Imágenes (solo en el enunciado, no en opciones): ![descripción](nombre.png) con un nombre de archivo simple, sin carpetas ni http. Solo si yo te indico qué imágenes hay.
+10. Títulos ::P01::, ::P02::... correlativos (A01, A02... para abiertas; C01, C02... para respuesta corta). Los comentarios empiezan por //.
+
+PUNTUACIÓN QUE QUIERO:
+[ESCRÍBELO AQUÍ, por ejemplo:]
+- 20 preguntas de test de 0.5 puntos cada una.
+- 2 preguntas abiertas de 2 puntos cada una.
+````
+
+**Cómo indicarle los puntos a la IA** (lo escribes tú al final del bloque, en lenguaje normal; la IA lo traduce a `[valor=N]`):
+
+| Lo que quieres | Lo que le escribes |
+|---|---|
+| Todas iguales | «20 preguntas de test, todas de 0,5 puntos.» |
+| Test normal y alguna más importante | «15 preguntas de test de 1 punto, y las preguntas 14 y 15 de 2 puntos.» |
+| Test + abiertas | «18 de test de 0,5 puntos y 2 abiertas de 3 puntos cada una.» |
+| Por dificultad | «Fáciles (1 punto), medias (1,5) y difíciles (2); pon 5 de cada.» |
+| Una abierta concreta | «La última pregunta es abierta y vale 4 puntos.» |
+| Respuesta corta | «Añade 5 preguntas de respuesta corta de formulación (fórmula ↔ nombre), de 0,5 puntos.» |
+
+No hace falta que sumen 10: la nota se proporciona sobre 10 con el total. Revisa siempre la **vista previa del panel** (respuesta correcta marcada ✓, valor de cada pregunta y reparto total) antes de publicar: la IA puede equivocarse, y la corrección del test depende de que la opción marcada con `=` sea la buena. Fíjate también en que la IA no haya puesto casi siempre la opción correcta como la más larga.
+
 ### Imágenes en las preguntas
 
 En el enunciado puedes poner una imagen con esta marca, que lleva **solo el nombre del archivo**:
@@ -144,10 +259,9 @@ La nota se calcula con normalidad: la app **no pone un 0 automático**. Las colu
 
 | Señal | Qué detecta | Margen |
 |---|---|---|
-| Página oculta | Otra pestaña, otra app (cuando cubre todo), pantalla bloqueada | al instante |
-| Ventana reducida | Solo en tabletas: pantalla dividida, Slide Over o Stage Manager que reducen la ventana | 1,5 s |
-| Ventana sin foco | Hacer clic en otra ventana o app | 2 s |
-| Ratón fuera de la página | Solo en ordenadores: otra ventana, otro monitor | 2 s |
+| Página oculta | Otra pestaña, otra app (cuando cubre todo), pantalla bloqueada | al instante en ordenadores; 2 s en tabletas (al desplazarse con el dedo desde el borde, el iPad activa a veces el Dock o la multitarea un instante) |
+| Ventana reducida | Solo en tabletas: pantalla dividida, Slide Over o Stage Manager que reducen la ventana. No cuenta mientras el alumno escribe en un cuadro de texto (el teclado en pantalla también encoge la ventana) ni al ampliar con dos dedos | 1,5 s |
+| Ventana sin foco | Solo en ordenadores: hacer clic en otra ventana o app. En tabletas no se usa, porque Safari en iPad la activa al ocultar el teclado y en otros gestos sin que el alumno salga | 2 s |
 | Salir de la pantalla completa | **Solo si marcas «Exigir pantalla completa»** al publicar (opcional, desactivada por defecto). Se pide pantalla completa al empezar; si el alumno sale de ella, el examen se oculta y un **toque** en cualquier parte (o el botón) la restaura | 5 s en tabletas, 1,5 s en ordenadores |
 
 La pantalla completa es opcional porque su comportamiento depende mucho del navegador y del dispositivo. Sin ella, la vigilancia sigue funcionando con las demás señales: la pantalla dividida se detecta por el tamaño de la ventana.
@@ -156,13 +270,23 @@ La pantalla completa es opcional porque su comportamiento depende mucho del nave
 
 Cada salida guarda en la hoja **qué señal la provocó** (`motivos_salida`, por ejemplo `reduced,hidden`): si en algún dispositivo salen salidas que no esperas, esa columna dice la causa.
 
+Durante un examen vigilado se pide al navegador que **mantenga la pantalla encendida**, para que el iPad no se bloquee solo mientras el alumno lee o piensa (eso contaba como salida). Funciona en iPadOS 16.4 o posterior; en versiones anteriores, sube el bloqueo automático en *Ajustes → Pantalla y brillo*.
+
+Si el iPad congela la página mientras el alumno está en otra app, la salida se cuenta igualmente al volver, con el tiempo real que estuvo fuera.
+
+El ratón fuera de la página **no** cuenta: se disparaba solo con acercarlo a la barra de pestañas o a la barra de desplazamiento, o con dejarlo en el borde. Si el alumno hace clic en otra ventana, lo detecta la señal de foco.
+
 **Lo que ninguna web puede detectar.** En un iPad, una app flotante (Slide Over) que se coloca encima **sin reducir ni quitar el foco a la ventana** no emite ninguna señal. Lo mismo ocurre con un móvil o un papel junto al ordenador. La medida eficaz para esos casos es el **Acceso guiado** del iPad (o el modo de app única del centro), que además impide abrir apps flotantes. Si en algún dispositivo una salida no se cuenta, abre `diagnostico.html` en él: muestra en directo qué señales emite.
 
 ### Ver resultados
 
-En **Mis exámenes** pulsa **Ver resultados** para abrir la hoja `R_<id>` de ese examen, con una fila por envío:
+En **Mis exámenes** pulsa **Ver hoja de Google** para abrir la hoja de ese examen (una pestaña **con el título del examen**; si repites título, se añade « (2)»; puedes renombrarla sin problema), con una fila por envío:
 
-`fecha | apellidos | nombre | grupo | aciertos | errores | blancos | nota | duracion_min | posible_duplicado | respuestas_json | salidas | segundos_fuera | tipo_envio | envio_id | motivos_salida`
+Las hojas **nuevas** están pensadas para leerse de un vistazo: cabecera azul, filas alternas, y esta primera parte visible:
+
+`apellidos | nombre | grupo | nota | (pendientes) | aciertos | errores | blancos | salidas | segundos_fuera | pegados | duracion_min | fecha | posible_duplicado`
+
+La **nota** sale en verde (aprobado) o rojo; `pendientes` (preguntas abiertas sin corregir), `salidas`, `segundos_fuera` y `pegados` se marcan en color cuando son mayores que 0. Después van **ocultas** las columnas técnicas (puntos del test, respuestas y puntos de las abiertas, `tipo_envio`, `envio_id`, `motivos_salida`, `respuestas_json`); si las necesitas, selecciona las columnas vecinas y elige «Mostrar columnas». Las hojas de exámenes anteriores conservan su formato.
 
 El alumno rellena **Nombre** y **Apellidos** en casillas separadas, y la hoja se mantiene **ordenada alfabéticamente por apellidos** (y, si coinciden, por nombre; sin distinguir tildes ni mayúsculas) cada vez que llega un envío.
 
@@ -170,13 +294,17 @@ Las hojas de exámenes publicados **antes** de este cambio conservan su formato 
 
 `envio_id` es un identificador interno que evita filas repetidas si un envío se reintenta. `posible_duplicado` es `TRUE` si ya había un envío con los mismos apellidos, nombre y grupo (sin tener en cuenta tildes, mayúsculas ni espacios). No se bloquea el envío; solo se marca para que lo revises.
 
+### La pestaña «Examenes»
+
+Es el registro de tus exámenes, con el mismo diseño que las hojas de resultados: título en negrita, **activo** en verde (abierto) o rojo (cerrado), fecha de creación legible. Las columnas técnicas (las preguntas con sus soluciones y el identificador de la hoja de resultados) quedan **ocultas**; no las borres. Al publicar un examen nuevo, la pestaña se pone bonita aunque ya la tuvieras. Puedes abrir o cerrar un examen desde el panel o cambiando `activo` a mano.
+
 ### Cerrar un examen
 
 Desde **Mis exámenes → Cerrar examen**. Los alumnos que abran el enlace verán «Examen cerrado». Puedes volver a abrirlo cuando quieras.
 
 ### Cómo se calcula la nota
 
-Cada acierto suma **1 punto**, cada pregunta en blanco **0** y cada error **resta una fracción de punto**.
+Cada acierto suma los puntos de la pregunta (**1** si no pone `[valor=N]`), cada pregunta en blanco **0** y cada error **resta una fracción de esos puntos**. Las preguntas abiertas las puntúas tú en la hoja (ver arriba) y las de respuesta corta suman sus puntos si aciertan y nunca restan; el resto de esta sección explica el test con preguntas de 1 punto.
 
 Al publicar el examen eliges la **penalización por cada error**, siempre como fracción:
 
@@ -189,7 +317,7 @@ Al publicar el examen eliges la **penalización por cada error**, siempre como f
 
 El panel muestra un ejemplo con la fracción elegida (12 aciertos, 5 errores y 3 en blanco de 20 preguntas), y el alumno ve en la pantalla inicial lo que resta cada error. La fracción se guarda reducida (2/6 pasa a 1/3).
 
-`nota = (aciertos − errores × penalización) / nº de preguntas × 10`, redondeada a 2 decimales. Por defecto la nota mínima es 0 (se puede permitir negativa al publicar el examen).
+`nota = (aciertos − errores × penalización) / nº de preguntas × 10` (con valores distintos: `(Σ puntos acertados − Σ puntos de errores × penalización) / Σ puntos de todas las preguntas × 10`), redondeada a 2 decimales. Por defecto la nota mínima es 0 (se puede permitir negativa al publicar el examen).
 
 Los exámenes ya publicados antes de poder elegir la penalización siguen con la automática. Si publicas con un `Code.gs` antiguo, el panel te avisa de que la penalización elegida no se aplicará.
 
@@ -250,8 +378,10 @@ css/styles.css             Estilos (claro y oscuro)
 js/config.js               URL del Apps Script
 js/api.js                  Llamadas al Apps Script (POST como text/plain, sin preflight CORS)
 js/student.js, admin.js    Lógica de cada página
-js/gift.js                 Parser GIFT (función pura)
-js/grading.js              Corrección y penalización fraccionaria (pura; replicada en Code.gs)
+js/correction.js           Pantalla de corrección de abiertas y de respuesta corta, y exportación CSV
+js/gift.js                 Parser GIFT: [valor=N], respuesta corta {=a =b} y abiertas {} (función pura)
+js/grading.js              Corrección ponderada y penalización fraccionaria (pura; replicada en Code.gs)
+js/short.js                Comparación de respuestas cortas (pura; replicada en Code.gs)
 js/images.js               Citas de imágenes ![alt](archivo.png) y límites (puro; réplica parcial en Code.gs)
 js/image-encode.js         Reduce y codifica las imágenes en el navegador (canvas)
 js/rich.js                 Pinta un enunciado con imágenes sin insertar HTML
@@ -271,4 +401,4 @@ node --test
 
 Guía de validación con Google real: [docs/PRUEBA_FINAL.md](docs/PRUEBA_FINAL.md).
 
-`tests/codegs.test.js` carga `Code.gs` con una hoja de cálculo simulada (`tests/fake-gas.js`, que imita también conversiones automáticas de Sheets como `1/3` → fecha) y comprueba que su corrección coincide con `js/grading.js` con miles de casos aleatorios. **Si cambias la lógica de corrección o el formato de las citas de imágenes en uno de los dos archivos, cámbiala también en el otro.**
+`tests/codegs.test.js` carga `Code.gs` con una hoja de cálculo simulada (`tests/fake-gas.js`, que imita también conversiones automáticas de Sheets como `1/3` → fecha) y comprueba que su corrección (incluida la de respuesta corta de `js/short.js`) coincide con `js/grading.js` con miles de casos aleatorios. **Si cambias la lógica de corrección o el formato de las citas de imágenes en uno de los dos archivos, cámbiala también en el otro.**

@@ -1,0 +1,204 @@
+// Preguntas abiertas y valores por pregunta: servidor (Code.gs simulado).
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { makeEnv } from "./fake-gas.js";
+import { parseGift } from "../js/gift.js";
+
+const GIFT = `::T1::[valor=2] Uno{=a~b~c~d}
+
+::T2::Dos{~a=b~c~d}
+
+::A1::[valor=3] Explica la fotosíntesis{}`;
+const settings = { titulo: "Mixto", grupo_destino: "2A", tiempo_min: 20, mostrar_nota: true };
+const plain = (x) => JSON.parse(JSON.stringify(x));
+const col = (rows, name) => rows[0].indexOf(name);
+const cell = (rows, i, name) => rows[i][col(rows, name)];
+
+function publish(env, extra = {}) {
+  const r = env.post({ action: "createExam", token: "secreto", ...settings, preguntas: parseGift(GIFT), ...extra });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  return r;
+}
+const base = (id, extra = {}) => ({ action: "submit", examId: id, nombre: "Ana", apellidos: "López", grupo: "B", ...extra });
+
+test("se crea con tipo y valor; el alumno recibe tipo y valor pero nunca la solución", () => {
+  const env = makeEnv();
+  const r = publish(env);
+  assert.equal(r.abiertas, 1);
+  const got = env.get({ action: "exam", id: r.id });
+  assert.deepEqual(plain(got.exam.questions.map((q) => [q.tipo, q.valor, q.options.length])), [["test", 2, 4], ["test", 1, 4], ["abierta", 3, 0]]);
+  assert.ok(!JSON.stringify(got).includes("correct"));
+});
+
+test("envío con abierta: texto en la hoja, nota provisional y el alumno solo ve el test", () => {
+  const env = makeEnv();
+  const { id } = publish(env);
+  const r = env.post(base(id, { respuestas: { q1: "a", q2: "a" }, abiertas: { q3: "Las plantas\r\nusan luz" }, pegados: 2 }));
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.nota, undefined, "con abiertas no hay nota definitiva");
+  // q1 acierta (+2), q2 falla (−1/3 con 4 opciones): 2 − 1/3 = 1.67 de 3
+  assert.deepEqual([r.abiertas, r.puntos_test, r.puntos_test_max], [1, 1.67, 3]);
+  const rows = env.results(id).rows;
+  const hdr = rows[0];
+  const resp = hdr.find((h) => h.endsWith("respuesta"));
+  const pts = hdr.find((h) => h.includes("puntos (máx 3)"));
+  assert.ok(resp && pts, hdr.join("|"));
+  assert.equal(cell(rows, 1, resp), "Las plantas\nusan luz");
+  assert.equal(cell(rows, 1, "pegados"), 2);
+  assert.equal(cell(rows, 1, "puntos_total"), 6);
+  assert.equal(cell(rows, 1, "pendientes"), 1);
+  assert.equal(cell(rows, 1, "nota"), 2.78, "provisional: solo el test (1,67 de 6 puntos)");
+  assert.ok(!rows[0].includes("nota_final"), "solo hay una columna de nota");
+});
+
+test("con permitir_negativa la nota puede ser negativa al corregir", () => {
+  const env = makeEnv();
+  const { id } = publish(env, { permitir_negativa: true });
+  env.post(base(id, { respuestas: { q1: "b" }, abiertas: {}, envioId: "n1" }));
+  const rows = env.results(id).rows;
+  assert.ok(cell(rows, 1, "nota") < 0);
+  const g = env.post({ action: "grade", token: "secreto", examId: id, envioId: "n1", qid: "q3", puntos: 0 });
+  assert.ok(g.nota < 0, JSON.stringify(g));
+});
+
+test("validación: id de abierta desconocido, test dentro de abiertas, demasiado largo", () => {
+  const env = makeEnv();
+  const { id } = publish(env);
+  assert.equal(env.post(base(id, { respuestas: {}, abiertas: { zz: "x" } })).error, "invalid_answers");
+  assert.equal(env.post(base(id, { respuestas: {}, abiertas: { q1: "x" } })).error, "invalid_answers");
+  assert.equal(env.post(base(id, { respuestas: { q3: "a" } })).error, "invalid_answers");
+  assert.equal(env.post(base(id, { respuestas: {}, abiertas: { q3: "x".repeat(4001) } })).error, "invalid_answers");
+  assert.equal(env.post(base(id, { respuestas: {}, abiertas: [] })).error, "invalid_answers");
+});
+
+test("un examen solo de test y sin valores se comporta como siempre (nota sobre 10)", () => {
+  const env = makeEnv();
+  const r = env.post({ action: "createExam", token: "secreto", ...settings, preguntas: [
+    { id: "q1", title: "", text: "A", options: [{ id: "a", text: "x" }, { id: "b", text: "y" }], correct: "a" }
+  ] });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const s = env.post(base(r.id, { respuestas: { q1: "a" } }));
+  assert.equal(s.nota, 10);
+  const rows = env.results(r.id).rows;
+  assert.ok(!rows[0].includes("pendientes"));
+});
+
+test("validación de preguntas: valor y tipo", () => {
+  const env = makeEnv();
+  const q = (extra) => [{ id: "q1", title: "", text: "A", options: [{ id: "a", text: "x" }, { id: "b", text: "y" }], correct: "a", ...extra }];
+  const create = (preguntas) => env.post({ action: "createExam", token: "secreto", ...settings, preguntas });
+  assert.equal(create(q({ valor: 0 })).ok, false);
+  assert.equal(create(q({ valor: 101 })).ok, false);
+  assert.equal(create(q({ tipo: "otra" })).ok, false);
+  assert.equal(create([{ id: "q1", text: "A", tipo: "abierta", options: [{ id: "a", text: "x" }] }]).ok, false);
+  assert.equal(create([{ id: "q1", text: "A", tipo: "abierta", valor: 2.5 }]).ok, true);
+});
+
+test("varias abiertas y orden por apellidos con columnas extra", () => {
+  const env = makeEnv();
+  const { id } = env.post({ action: "createExam", token: "secreto", ...settings, preguntas: parseGift("::A::[valor=1] Uno{}\n\n::B::[valor=2] Dos{}\n\n::C::Tres{=a~b}") });
+  for (const [n, a] of [["Marta", "Zapata"], ["Pedro", "Álvarez"]]) {
+    assert.equal(env.post(base(id, { nombre: n, apellidos: a, respuestas: { q3: "a" }, abiertas: { q1: n + "1", q2: n + "2" } })).ok, true);
+  }
+  const rows = env.results(id).rows;
+  assert.deepEqual([cell(rows, 1, "apellidos"), cell(rows, 2, "apellidos")], ["Álvarez", "Zapata"]);
+  assert.equal(cell(rows, 1, rows[0].find((h) => h.startsWith("Q1") && h.endsWith("respuesta"))), "Pedro1");
+  assert.equal(cell(rows, 1, "pendientes"), 2);
+});
+
+test("hoja nueva: lo importante primero y las columnas técnicas ocultas al final", () => {
+  const env = makeEnv();
+  const { id } = publish(env);
+  const sh = env.results(id);
+  assert.deepEqual(plain(sh.rows[0].slice(0, 5)), ["apellidos", "nombre", "grupo", "nota", "pendientes"]);
+  assert.equal(sh.rows[0].at(-1), "respuestas_json");
+  const [first, count] = sh.hidden;
+  assert.equal(first + count - 1, sh.rows[0].length, "las ocultas llegan hasta la última");
+  assert.ok(sh.rows[0].slice(first - 1).includes("envio_id"));
+  assert.ok(!sh.rows[0].slice(0, first - 1).includes("envio_id"));
+});
+
+test("results: devuelve respuestas abiertas y la nota calculada; exige token", () => {
+  const env = makeEnv();
+  const { id } = publish(env);
+  env.post(base(id, { respuestas: { q1: "a", q2: "b" }, abiertas: { q3: "Respuesta larga" }, pegados: 1, envioId: "e1" }));
+  assert.equal(env.post({ action: "results", token: "mal", examId: id }).error, "unauthorized");
+  const r = env.post({ action: "results", token: "secreto", examId: id });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(plain(r.exam.preguntas.map((q) => [q.tipo, q.valor])), [["test", 2], ["test", 1], ["abierta", 3]]);
+  const row = r.rows[0];
+  assert.deepEqual([row.apellidos, row.pegados, row.pendientes, row.abiertas.q3.texto, row.abiertas.q3.puntos], ["López", 1, 1, "Respuesta larga", null]);
+  assert.equal(row.nota, 5, "test 3 de 6 puntos, abierta sin corregir");
+});
+
+test("grade: guarda los puntos de una abierta, recalcula la nota y valida", () => {
+  const env = makeEnv();
+  const { id } = publish(env);
+  env.post(base(id, { respuestas: { q1: "a", q2: "b" }, abiertas: { q3: "x" }, envioId: "e1" }));
+  const g = (puntos, extra = {}) => env.post({ action: "grade", token: "secreto", examId: id, envioId: "e1", qid: "q3", puntos, ...extra });
+  const ok = g(2);
+  assert.deepEqual(plain([ok.ok, ok.puntos, ok.pendientes, ok.nota]), [true, 2, 0, 8.33]);
+  assert.equal(env.post({ action: "results", token: "secreto", examId: id }).rows[0].abiertas.q3.puntos, 2);
+  const rows = env.results(id).rows;
+  assert.deepEqual([cell(rows, 1, "nota"), cell(rows, 1, "pendientes")], [8.33, 0], "la hoja se actualiza al corregir");
+  assert.equal(g(4).error, "invalid_grade", "más del máximo");
+  assert.equal(g(-1).error, "invalid_grade");
+  assert.equal(g(1, { qid: "q1" }).error, "invalid_grade", "no es abierta");
+  assert.equal(g(1, { envioId: "nada" }).error, "not_found");
+  assert.equal(g(1, { token: "mal" }).error, "unauthorized");
+  const cleared = g(null);
+  assert.deepEqual(plain([cleared.ok, cleared.pendientes, cleared.nota]), [true, 1, 5]);
+});
+
+/* ------------------------- nombre de la hoja de resultados ------------------------- */
+
+const publishAs = (env, titulo) => {
+  const r = env.post({ action: "createExam", token: "secreto", ...settings, titulo, preguntas: parseGift("::P::Uno{=a~b}") });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  return r.id;
+};
+
+test("la hoja de resultados se llama como el examen; los títulos repetidos no chocan", () => {
+  const env = makeEnv();
+  publishAs(env, "Tema 1: ¿Qué es la ciencia?");
+  publishAs(env, "Tema 1: ¿Qué es la ciencia?");
+  const names = [...env.sheets.keys()];
+  assert.ok(names.includes("Tema 1 ¿Qué es la ciencia"), names.join("|")); // sin : ni ?
+  assert.ok(names.includes("Tema 1 ¿Qué es la ciencia (2)"), names.join("|"));
+  assert.ok(names.every((n) => n.length <= 100));
+});
+
+test("títulos con caracteres prohibidos, vacíos tras limpiar o muy largos dan un nombre válido", () => {
+  const env = makeEnv();
+  publishAs(env, "[A]/B\\C*D");
+  publishAs(env, "???");
+  publishAs(env, "x".repeat(120));
+  const names = [...env.sheets.keys()].filter((n) => !["Examenes", "Imagenes"].includes(n));
+  assert.deepEqual(names.map((n) => /[\[\]*\/\\?:]/.test(n)), [false, false, false]);
+  assert.ok(names.includes("A B C D") && names.includes("Examen"));
+  assert.ok(names.every((n) => n.length <= 100));
+});
+
+test("renombrar la hoja no rompe nada: los envíos y la lista la siguen encontrando", () => {
+  const env = makeEnv();
+  const id = publishAs(env, "Mi examen");
+  env.rename("Mi examen", "Notas finales 2A");
+  assert.equal(env.post(base(id, { respuestas: { q1: "a" } })).ok, true);
+  assert.equal(env.results(id).rows.length, 2);
+  assert.equal(env.get({ action: "list", token: "secreto" }).exams[0].envios, 1);
+  assert.equal(env.sheets.size, 2, "no se crea otra hoja"); // Examenes + la renombrada
+});
+
+test("un examen anterior (hoja R_<id>, sin hoja_id) sigue funcionando; si se borra la hoja se vuelve a crear", () => {
+  const env = makeEnv();
+  const id = publishAs(env, "Antiguo");
+  env.rename("Antiguo", `R_${id}`);
+  const exams = env.sheets.get("Examenes");
+  exams.rows[1].length = 16; // sin la columna hoja_id
+  assert.equal(env.post(base(id, { respuestas: { q1: "a" } })).ok, true);
+  assert.equal(env.sheets.get(`R_${id}`).rows.length, 2);
+  env.sheets.delete(`R_${id}`); // la profesora la borra
+  assert.equal(env.post(base(id, { respuestas: { q1: "b" }, nombre: "Luis" })).ok, true);
+  assert.ok(env.sheets.has("Antiguo"), "se recrea con el título del examen");
+  assert.ok(exams.rows[1][16] !== undefined && exams.rows[1][16] !== "", "y se anota su identificador");
+});

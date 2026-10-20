@@ -26,18 +26,26 @@ test("gradeExam_ de Code.gs coincide con js/grading.js en 2000 casos aleatorios"
     const qs = Array.from({ length: nq }, (_, i) => {
       const k = 2 + Math.floor(rnd() * 5);
       const ids = "abcdef".slice(0, k).split("");
-      return { id: `q${i + 1}`, options: ids.map((id) => ({ id })), correct: ids[Math.floor(rnd() * k)] };
+      const q = { id: `q${i + 1}`, options: ids.map((id) => ({ id })), correct: ids[Math.floor(rnd() * k)] };
+      const r = rnd();
+      if (r < 0.2) { q.tipo = "abierta"; q.options = []; q.correct = null; }
+      else if (r < 0.35) { q.tipo = "corta"; q.options = []; q.correct = null; q.respuestas = ["NaCl", "cloruro de sodio"]; }
+      if (r > 0.4) q.valor = Math.round((0.25 + rnd() * 4) * 4) / 4;
+      return q;
     });
     const ans = {};
     for (const q of qs) {
       const r = rnd();
-      if (r < 0.25) continue;
+      if (r < 0.25 || q.tipo === "abierta") continue;
+      if (q.tipo === "corta") { ans[q.id] = ["NaCl", "nacl", "Cloruro de Sodio", "  ", "KCl"][Math.floor(rnd() * 5)]; continue; }
       ans[q.id] = r < 0.6 ? q.correct : q.options[Math.floor(rnd() * q.options.length)].id;
     }
     const allowNegative = rnd() < 0.5;
+    const shortOverrides = {};
+    for (const q of qs) if (q.tipo === "corta" && rnd() < 0.3) shortOverrides[q.id] = rnd() < 0.5;
     assert.deepEqual(
-      JSON.parse(JSON.stringify(gradeServer(qs, ans, { allowNegative }))),
-      gradeExam(qs, ans, { allowNegative })
+      JSON.parse(JSON.stringify(gradeServer(qs, ans, { allowNegative, shortOverrides }))),
+      gradeExam(qs, ans, { allowNegative, shortOverrides })
     );
     // con penalización propia (fracción a/b)
     const den = 1 + Math.floor(rnd() * 9);
@@ -64,14 +72,14 @@ test("flujo completo: crear, consultar sin soluciones, enviar, listar, cerrar", 
   });
   assert.deepEqual({ ...sub }, { ok: true, nota: 2.22, aciertos: 1, errores: 1, blancos: 1 }); // (1-1/3)/3*10
 
-  const rows1 = env.sheets.get(`R_${id}`).rows;
+  const rows1 = env.results(id).rows;
   assert.equal(cell(rows1, 1, "nombre"), "Ana López");
   assert.equal(cell(rows1, 1, "posible_duplicado"), false);
 
   // mismo alumno con tildes/mayúsculas distintas -> duplicado, pero no se bloquea
   const again = env.post({ action: "submit", examId: id, nombre: "ANA LOPEZ", grupo: "2º  a", respuestas: {} });
   assert.equal(again.ok, true);
-  assert.equal(cell(env.sheets.get(`R_${id}`).rows, 2, "posible_duplicado"), true);
+  assert.equal(cell(env.results(id).rows, 2, "posible_duplicado"), true);
 
   const list = env.get({ action: "list", token: "secreto" });
   assert.equal(list.exams[0].envios, 2);
@@ -113,7 +121,7 @@ test("validaciones de submit", () => {
   assert.equal(env.post({ ...base, respuestas: { q99: "a" } }).error, "invalid_answers");
   assert.equal(env.post({ ...base, respuestas: [] }).error, "invalid_answers");
   assert.equal(env.post({ ...base, examId: "nope" }).error, "not_found");
-  assert.equal(env.sheets.get(`R_${id}`).rows.length, 1, "no se guarda nada si falla");
+  assert.equal(env.results(id).rows.length, 1, "no se guarda nada si falla");
 });
 
 test("acciones de administrador exigen token", () => {
@@ -162,7 +170,7 @@ test("regresión: un id con forma de notación científica no se convierte en n�
   const list = env.get({ action: "list", token: "secreto" }).exams[0];
   assert.equal(list.id, id);
   assert.equal(list.envios, 1, "la hoja R_ de resultados es la misma que la del examen");
-  assert.equal(cell(env.sheets.get(`R_${id}`).rows, 1, "grupo"), "1-2", "el grupo no se convierte en fecha");
+  assert.equal(cell(env.results(id).rows, 1, "grupo"), "1-2", "el grupo no se convierte en fecha");
 });
 
 test("regresión: un código de acceso con forma numérica se compara bien", () => {
@@ -209,7 +217,7 @@ test("el envío registra salidas, segundos fuera y tipo de envío", () => {
     salidas: 1, segundos_fuera: 12.34, envio: "salida", envioId: "abc-1",
   });
   assert.equal(r.ok, true);
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   const get = (name) => cell(rows, 1, name);
   assert.deepEqual([get("salidas"), get("segundos_fuera"), get("tipo_envio"), get("envio_id"), get("motivos_salida")], [1, 12.3, "salida", "abc-1", ""]);
 });
@@ -218,7 +226,7 @@ test("valores de vigilancia saneados (tipo desconocido, negativos, texto)", () =
   const env = makeEnv();
   const id = publish(env);
   env.post({ action: "submit", examId: id, nombre: "A", grupo: "B", respuestas: {}, salidas: -5, segundos_fuera: "x", envio: "hack", envioId: 7 });
-  const rowsV = env.sheets.get(`R_${id}`).rows;
+  const rowsV = env.results(id).rows;
   assert.deepEqual(["salidas", "segundos_fuera", "tipo_envio", "envio_id", "motivos_salida"].map((n) => cell(rowsV, 1, n)), [0, 0, "manual", "", ""]);
 });
 
@@ -230,24 +238,24 @@ test("el mismo envioId no crea una segunda fila y completa los segundos fuera", 
   const second = env.post({ ...base, salidas: 1, segundos_fuera: 45 }); // reenvío al volver
   assert.equal(first.ok && second.ok, true);
   assert.equal(second.nota, first.nota);
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   assert.equal(rows.length, 2, "una sola fila de datos");
   assert.deepEqual([cell(rows, 1, "salidas"), cell(rows, 1, "segundos_fuera")], [1, 45]);
   assert.equal(cell(rows, 1, "posible_duplicado"), false, "no se marca como duplicado de sí mismo");
   // otro alumno con otro envioId sí es una fila nueva
   env.post({ ...base, envioId: "dos", nombre: "Luis" });
-  assert.equal(env.sheets.get(`R_${id}`).rows.length, 3);
+  assert.equal(env.results(id).rows.length, 3);
 });
 
 test("hojas de resultados antiguas reciben las columnas nuevas por nombre", () => {
   const env = makeEnv();
   const id = publish(env);
-  const sheet = env.sheets.get(`R_${id}`);
+  const sheet = env.results(id);
   // cabecera de la primera versión: sin apellidos ni columnas de vigilancia
   sheet.rows = [["fecha", "nombre", "grupo", "aciertos", "errores", "blancos", "nota", "duracion_min", "posible_duplicado", "respuestas_json"]];
   assert.equal(env.post({ action: "submit", examId: id, nombre: "Ana", apellidos: "López", grupo: "B", respuestas: {}, envioId: "x1" }).ok, true);
   const h = sheet.rows[0];
-  assert.deepEqual(plain(h.slice(10)), ["salidas", "segundos_fuera", "tipo_envio", "envio_id", "motivos_salida"]);
+  assert.deepEqual(plain(h.slice(10)), ["salidas", "segundos_fuera", "tipo_envio", "envio_id", "motivos_salida", "puntos_test", "puntos_total", "pegados"]);
   assert.ok(!h.includes("apellidos"), "no se inserta una columna en medio de una hoja ya en uso");
   assert.equal(cell(sheet.rows, 1, "nombre"), "López, Ana", "en hojas anteriores el nombre se guarda como Apellidos, Nombre");
 });
@@ -280,10 +288,10 @@ test("motivos_salida se guarda saneado y se completa en el reenvío del mismo en
   const id = publish(env, { control_salidas: true });
   const base = { action: "submit", examId: id, nombre: "Ana", grupo: "2A", respuestas: {}, envioId: "m1", salidas: 2 };
   env.post({ ...base, motivos_salida: "reduced,<b>hidden</b>" });
-  assert.equal(cell(env.sheets.get(`R_${id}`).rows, 1, "motivos_salida"), "reduced,bhiddenb");
+  assert.equal(cell(env.results(id).rows, 1, "motivos_salida"), "reduced,bhiddenb");
   env.post({ ...base, motivos_salida: "reduced,bhidden,blurred" });
-  assert.equal(env.sheets.get(`R_${id}`).rows.length, 2, "una sola fila");
-  assert.equal(cell(env.sheets.get(`R_${id}`).rows, 1, "motivos_salida"), "reduced,bhidden,blurred");
+  assert.equal(env.results(id).rows.length, 2, "una sola fila");
+  assert.equal(cell(env.results(id).rows, 1, "motivos_salida"), "reduced,bhidden,blurred");
 });
 
 /* ------------------------- penalización por examen ------------------------- */
@@ -381,7 +389,7 @@ test("pantalla_completa llega en info antes de pedir el código; un examen anter
 const submitAs = (env, id, nombre, apellidos, extra = {}) =>
   env.post({ action: "submit", examId: id, nombre, apellidos, grupo: "2A", respuestas: {}, ...extra });
 const names = (env, id) => {
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   return rows.slice(1).map((_, i) => `${cell(rows, i + 1, "apellidos")}, ${cell(rows, i + 1, "nombre")}`);
 };
 
@@ -389,8 +397,8 @@ test("las hojas nuevas separan apellidos y nombre", () => {
   const env = makeEnv();
   const id = publish(env);
   assert.equal(submitAs(env, id, "  Ana ", " López   Pérez ").ok, true);
-  const rows = env.sheets.get(`R_${id}`).rows;
-  assert.deepEqual(plain(rows[0].slice(0, 4)), ["fecha", "apellidos", "nombre", "grupo"]);
+  const rows = env.results(id).rows;
+  assert.deepEqual(plain(rows[0].slice(0, 4)), ["apellidos", "nombre", "grupo", "nota"]);
   assert.equal(cell(rows, 1, "apellidos"), "López Pérez");
   assert.equal(cell(rows, 1, "nombre"), "Ana");
 });
@@ -402,14 +410,14 @@ test("los apellidos son obligatorios si se envía el campo y se limitan a 60 car
   assert.equal(submitAs(env, id, "Ana", "   ").error, "invalid_surname");
   assert.equal(submitAs(env, id, "Ana", "x".repeat(61)).error, "invalid_surname");
   assert.equal(submitAs(env, id, "", "López").error, "invalid_name");
-  assert.equal(env.sheets.get(`R_${id}`).rows.length, 1, "no se guarda nada si falla");
+  assert.equal(env.results(id).rows.length, 1, "no se guarda nada si falla");
 });
 
 test("una página anterior (sin campo apellidos) sigue pudiendo enviar", () => {
   const env = makeEnv();
   const id = publish(env);
   assert.equal(env.post({ action: "submit", examId: id, nombre: "Ana López", grupo: "2A", respuestas: {} }).ok, true);
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   assert.equal(cell(rows, 1, "nombre"), "Ana López");
   assert.equal(cell(rows, 1, "apellidos"), "");
 });
@@ -439,7 +447,7 @@ test("tras ordenar, el reenvío del mismo envío actualiza la fila correcta", ()
   submitAs(env, id, "Marta", "Zapata", { envioId: "m", salidas: 1, segundos_fuera: 0 });
   submitAs(env, id, "Pedro", "Álvarez", { envioId: "p", salidas: 1, segundos_fuera: 0 });   // pasa por delante de Zapata
   submitAs(env, id, "Marta", "Zapata", { envioId: "m", salidas: 1, segundos_fuera: 30 });   // reenvío de Marta
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   assert.equal(rows.length, 3);
   assert.equal(cell(rows, 1, "segundos_fuera"), 0, "Álvarez, Pedro no cambia");
   assert.equal(cell(rows, 2, "segundos_fuera"), 30, "Zapata, Marta sí");
@@ -451,7 +459,7 @@ test("posible_duplicado compara apellidos y nombre sin tildes, mayúsculas ni es
   submitAs(env, id, "María", "López Pérez");
   submitAs(env, id, "MARIA", "  lopez   perez ");
   submitAs(env, id, "Pedro", "López Pérez");
-  const rows = env.sheets.get(`R_${id}`).rows;
+  const rows = env.results(id).rows;
   const dups = rows.slice(1).map((_, i) => cell(rows, i + 1, "posible_duplicado"));
   assert.equal(dups.filter(Boolean).length, 1, "solo la segunda María es posible duplicado");
 });
@@ -459,13 +467,13 @@ test("posible_duplicado compara apellidos y nombre sin tildes, mayúsculas ni es
 test("las hojas anteriores (sin apellidos) siguen funcionando y no se reordenan", () => {
   const env = makeEnv();
   const id = publish(env);
-  const sheet = env.sheets.get(`R_${id}`);
+  const sheet = env.results(id);
   sheet.rows = [["fecha", "nombre", "grupo", "aciertos", "errores", "blancos", "nota", "duracion_min", "posible_duplicado", "respuestas_json", "salidas", "segundos_fuera", "tipo_envio", "envio_id", "motivos_salida"]];
   submitAs(env, id, "Marta", "Zapata");
   submitAs(env, id, "Pedro", "Álvarez");
   const rows = sheet.rows;
   assert.deepEqual([cell(rows, 1, "nombre"), cell(rows, 2, "nombre")], ["Zapata, Marta", "Álvarez, Pedro"], "orden de llegada");
-  assert.equal(rows[0].length, 15, "no se añaden columnas");
+  assert.equal(rows[0].length, 18, "solo se añaden columnas al final (puntos_test, puntos_total, pegados)");
 });
 
 /* ------------------------- imágenes en los enunciados ------------------------- */
@@ -479,7 +487,7 @@ const publishImg = (env, extra = {}) =>
 
 test("version: el panel puede saber qué funciones tiene el script", () => {
   const env = makeEnv();
-  assert.deepEqual(plain(env.get({ action: "version" })), { ok: true, funciones: ["imagenes"] });
+  assert.deepEqual(plain(env.get({ action: "version" })), { ok: true, funciones: ["imagenes", "abiertas", "correccion", "revision", "cortas", "instrucciones"] });
 });
 
 test("imágenes: se guardan troceadas, se devuelven al alumno y las preguntas no filtran la solución", () => {

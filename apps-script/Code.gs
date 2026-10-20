@@ -6,7 +6,7 @@
  *
  * - La corrección se hace AQUÍ, nunca en el navegador del alumno.
  * - El token de administración vive en Propiedades del script (ADMIN_TOKEN).
- * - gradeExam_ replica exactamente js/grading.js (hay un test que lo comprueba).
+ * - gradeExam_ replica exactamente js/grading.js y shortAnswerMatches_ js/short.js (hay tests que lo comprueban).
  */
 
 const SHEET_EXAMS = 'Examenes';
@@ -14,7 +14,7 @@ const EXAM_HEADERS = [
   'id', 'titulo', 'grupo_destino', 'activo', 'codigo_acceso', 'tiempo_min',
   'barajar_preguntas', 'barajar_opciones', 'mostrar_nota', 'permitir_negativa',
   'preguntas_json', 'creado', 'control_salidas', 'salidas_permitidas', 'penalizacion',
-  'pantalla_completa'
+  'pantalla_completa', 'hoja_id', 'revision', 'instrucciones'
 ];
 // Hoja de resultados (una por examen). Orden de las columnas de las hojas nuevas; las hojas de versiones
 // anteriores se leen por el nombre de la cabecera y reciben al final las columnas extra que les falten.
@@ -23,6 +23,8 @@ const RESULT_BASE = [
   'duracion_min', 'posible_duplicado', 'respuestas_json'
 ];
 const RESULT_EXTRA = ['salidas', 'segundos_fuera', 'tipo_envio', 'envio_id', 'motivos_salida'];
+// Columnas que se añaden siempre: puntos del test, total del examen e intentos de pegar.
+const RESULT_POINTS = ['puntos_test', 'puntos_total', 'pegados'];
 const RESULT_HEADERS = RESULT_BASE.concat(RESULT_EXTRA);
 const RESULT_TEXT_COLUMNS = ['apellidos', 'nombre', 'grupo', 'envio_id', 'motivos_salida']; // nunca números ni fechas
 const ENVIO_TYPES = ['manual', 'tiempo', 'salida'];
@@ -31,6 +33,11 @@ const WARN_CHARS = 45000;     // aviso: cerca del límite de celda
 const MAX_CHARS = 49000;      // límite duro (la celda admite 50 000)
 const MAX_QUESTIONS = 200;
 const MAX_OPTIONS = 26;
+const MAX_VALUE = 100;        // puntos máximos de una pregunta
+const MAX_OPEN_CHARS = 4000;  // longitud máxima de una respuesta abierta
+const MAX_INSTRUCTIONS = 2000; // instrucciones del examen para el alumno
+const MAX_SHORT_CHARS = 200;  // longitud máxima de una respuesta corta (y de cada respuesta aceptada)
+const MAX_SHORT_ANSWERS = 20; // respuestas aceptadas por pregunta de respuesta corta
 
 // Imágenes de los enunciados: ![descripción](archivo.png). Se guardan troceadas en la hoja "Imagenes".
 const SHEET_IMAGES = 'Imagenes';
@@ -42,7 +49,7 @@ const IMAGE_CHUNK = 40000;             // una celda admite 50 000 caracteres
 const CACHE_PART = 90000;              // una entrada de caché admite 100 KB
 const CACHE_SECONDS = 21600;
 const IMAGE_MIMES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
-const FEATURES = ['imagenes'];         // capacidades de esta versión del script (las lee el panel)
+const FEATURES = ['imagenes', 'abiertas', 'correccion', 'revision', 'cortas', 'instrucciones'];         // capacidades de esta versión del script (las lee el panel)
 const DEFAULT_ALLOWED_EXITS = 3;   // salidas permitidas antes del envío automático
 const MAX_ALLOWED_EXITS = 20;
 
@@ -80,6 +87,10 @@ function handlePost_(body) {
     case 'submit': return submit_(body);
     case 'createExam': return createExam_(body);
     case 'setActive': return setActive_(body);
+    case 'setReview': return setReview_(body);
+    case 'review': return review_(body);
+    case 'results': return results_(body);
+    case 'grade': return grade_(body);
     default: return fail_('bad_request', 'Acción no reconocida.');
   }
 }
@@ -115,6 +126,7 @@ function getExam_(params) {
   var info = {
     titulo: exam.titulo,
     n_preguntas: questions.length,
+    n_cortas: questions.filter(isShort_).length,
     tiempo_min: exam.tiempo_min,
     requiere_codigo: exam.codigo_acceso !== '',
     control_salidas: exam.control_salidas,
@@ -146,13 +158,16 @@ function getExam_(params) {
       salidas_permitidas: exam.salidas_permitidas,
       penalizacion: exam.penalizacion,
       pantalla_completa: exam.pantalla_completa,
+      instrucciones: exam.instrucciones,
       imagenes: loadImages_(exam.id, questions),
       questions: questions.map(function (q) {
         return {
           id: q.id,
           title: q.title,
           text: q.text,
-          options: q.options.map(function (o) { return { id: o.id, text: o.text }; })
+          tipo: questionType_(q), // nunca las respuestas aceptadas de las de respuesta corta
+          valor: questionValue_(q),
+          options: (q.options || []).map(function (o) { return { id: o.id, text: o.text }; })
         };
       })
     }
@@ -186,15 +201,43 @@ function submit_(p) {
   if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
     return fail_('invalid_answers', 'Las respuestas no tienen el formato esperado.');
   }
-  var known = {};
-  questions.forEach(function (q) { known[q.id] = true; });
+  var known = {}, openIds = {};
+  questions.forEach(function (q) { if (isOpen_(q)) openIds[q.id] = true; else known[q.id] = q; });
   for (var key in answers) {
     if (!Object.prototype.hasOwnProperty.call(answers, key)) continue;
     var v = answers[key];
     if (!known[key] || !(v === null || typeof v === 'string')) {
       return fail_('invalid_answers', 'Las respuestas no corresponden a este examen.');
     }
+    if (isShort_(known[key]) && v !== null) {
+      answers[key] = v.replace(/\s+/g, ' ').trim();
+      if (answers[key].length > MAX_SHORT_CHARS) {
+        return fail_('invalid_answers', 'Una respuesta corta supera los ' + MAX_SHORT_CHARS + ' caracteres.');
+      }
+    }
   }
+
+  // Respuestas abiertas: id de pregunta -> texto (se guardan tal cual en la hoja del profesor).
+  var openAnswers = {};
+  var given = p.abiertas;
+  if (given !== undefined && given !== null) {
+    if (typeof given !== 'object' || Array.isArray(given)) {
+      return fail_('invalid_answers', 'Las respuestas no tienen el formato esperado.');
+    }
+    for (var okey in given) {
+      if (!Object.prototype.hasOwnProperty.call(given, okey)) continue;
+      var ov = given[okey];
+      if (!openIds[okey] || !(ov === null || typeof ov === 'string')) {
+        return fail_('invalid_answers', 'Las respuestas no corresponden a este examen.');
+      }
+      var txt = String(ov === null ? '' : ov).replace(/\r\n?/g, '\n').trim();
+      if (txt.length > MAX_OPEN_CHARS) {
+        return fail_('invalid_answers', 'Una respuesta abierta supera los ' + MAX_OPEN_CHARS + ' caracteres.');
+      }
+      openAnswers[okey] = txt;
+    }
+  }
+  var pegados = clampNumber_(p.pegados, 9999, 0);
 
   var result;
   try {
@@ -222,7 +265,7 @@ function submit_(p) {
     return fail_('busy', 'El servidor está ocupado. Inténtalo de nuevo en unos segundos.');
   }
   try {
-    var sheet = getResultsSheet_(exam.id);
+    var sheet = getResultsSheet_(exam, questions);
     var rows = sheet.getDataRange().getValues();
     var headers = rows[0].map(String);
     var H = headerMap_(headers); // nombre de columna -> posición (desde 0)
@@ -261,8 +304,12 @@ function submit_(p) {
         aciertos: result.aciertos, errores: result.errores, blancos: result.blancos, nota: result.nota,
         duracion_min: duracion, posible_duplicado: duplicado, respuestas_json: JSON.stringify(answers),
         salidas: salidas, segundos_fuera: segundosFuera, tipo_envio: tipoEnvio, envio_id: envioId,
-        motivos_salida: motivos
+        motivos_salida: motivos,
+        puntos_test: result.puntosTest, puntos_total: result.puntosTotal, pegados: pegados,
+        pendientes: result.abiertas // preguntas abiertas sin corregir; la nota es la del test hasta que se corrija
       };
+      var openQs = questions.filter(isOpen_);
+      openQs.forEach(function (q) { values[openColumns_(q, questions).resp] = openAnswers[q.id] || ''; });
       var textCols = [];
       var row = headers.map(function (name, idx) {
         if (RESULT_TEXT_COLUMNS.indexOf(name) !== -1) textCols.push(idx + 1);
@@ -281,7 +328,14 @@ function submit_(p) {
 
   var out = { ok: true };
   if (exam.mostrar_nota) {
-    out.nota = result.nota;
+    if (result.abiertas > 0) {
+      // Con preguntas abiertas la nota no es definitiva: el alumno solo ve la parte del test.
+      out.abiertas = result.abiertas;
+      out.puntos_test = result.puntosTest;
+      out.puntos_test_max = result.puntosTestMax;
+    } else {
+      out.nota = result.nota;
+    }
     out.aciertos = result.aciertos;
     out.errores = result.errores;
     out.blancos = result.blancos;
@@ -335,6 +389,8 @@ function createExam_(p) {
   var id;
   try {
     id = newExamId_();
+    // La hoja de resultados se llama como el examen; se guarda su identificador interno para no depender del nombre.
+    var resultsSheet = createResultsSheet_(titulo, questions);
     appendRowText_(getExamsSheet_(), [
       id,
       titulo,
@@ -351,15 +407,18 @@ function createExam_(p) {
       toBool_(p.control_salidas),
       allowedExits_(p.salidas_permitidas),
       penalizacion,
-      toBool_(p.pantalla_completa)
-    ], [1, 3, 5, 15]);
-    getResultsSheet_(id);
+      toBool_(p.pantalla_completa),
+      resultsSheet.getSheetId(),
+      false, // revisión: la publica el profesor desde el panel cuando todos han hecho el examen
+      cleanInstructions_(p.instrucciones)
+    ], [1, 3, 5, 15, 19]);
+    formatExamsSheet_(getExamsSheet_()); // también embellece la hoja de quien ya la tenía
     storeImages_(id, images);
   } finally {
     lock.releaseLock();
   }
 
-  var out = { ok: true, id: id, imagenes: images.length, n_preguntas: questions.length, caracteres: json.length, penalizacion: penalizacion,
+  var out = { ok: true, id: id, imagenes: images.length, abiertas: questions.filter(isOpen_).length, n_preguntas: questions.length, caracteres: json.length, penalizacion: penalizacion,
     pantalla_completa: toBool_(p.pantalla_completa) };
   if (json.length > WARN_CHARS) {
     out.warning = 'El examen ocupa ' + json.length + ' de 50 000 caracteres: está cerca del límite de la celda.';
@@ -368,18 +427,94 @@ function createExam_(p) {
 }
 
 function setActive_(p) {
+  return setExamFlag_(p, 'activo', p.activo);
+}
+
+// Publica u oculta la revisión: con ella, cada alumno ve sus respuestas y las correctas.
+function setReview_(p) {
+  var res = setExamFlag_(p, 'revision', p.revision);
+  if (res.ok) formatExamsSheet_(getExamsSheet_()); // da formato a la columna en hojas de versiones anteriores
+  return res;
+}
+
+function setExamFlag_(p, name, value) {
   var auth = checkToken_(p.token);
   if (auth) return auth;
   var sheet = getExamsSheet_();
   var rows = sheet.getDataRange().getValues();
-  var col = EXAM_HEADERS.indexOf('activo');
+  var col = EXAM_HEADERS.indexOf(name);
   for (var i = 1; i < rows.length; i++) {
     if (String(rows[i][0]) === String(p.id)) {
-      sheet.getRange(i + 1, col + 1).setValue(toBool_(p.activo));
-      return { ok: true, id: String(p.id), activo: toBool_(p.activo) };
+      sheet.getRange(i + 1, col + 1).setValue(toBool_(value));
+      var out = { ok: true, id: String(p.id) };
+      out[name] = toBool_(value);
+      return out;
     }
   }
   return fail_('not_found', 'Este examen no existe.');
+}
+
+// Revisión del alumno: sus respuestas, las correctas y los puntos de las abiertas. Solo si el profesor la ha
+// publicado, y solo del envío cuyo identificador (aleatorio, guardado en el dispositivo del alumno) se presenta.
+// Funciona aunque el examen esté cerrado.
+function review_(p) {
+  var exam = findExam_(p.examId);
+  if (!exam) return fail_('not_found', 'Este examen no existe.');
+  if (!exam.revision) return fail_('review_closed', 'Tu profesor todavía no ha publicado la revisión de este examen.');
+  var envioId = typeof p.envioId === 'string' ? p.envioId.trim().slice(0, 64) : '';
+  if (!envioId) return fail_('bad_request', 'Falta el identificador del envío.');
+
+  var questions = JSON.parse(exam.preguntas_json);
+  var sh = findResultsSheet_(exam);
+  var rows = sh ? sh.getDataRange().getValues() : [];
+  var H = rows.length ? headerMap_(rows[0].map(String)) : {};
+  var row = null;
+  if (H.envio_id !== undefined) {
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][H.envio_id]) === envioId) { row = rows[i]; break; }
+    }
+  }
+  if (!row) return fail_('send_not_found', 'No se encuentra tu examen entre los enviados.');
+
+  var answers = {};
+  try { answers = JSON.parse(String(row[H.respuestas_json] || '{}')) || {}; } catch (err) { answers = {}; }
+  var openQs = questions.filter(isOpen_);
+  var get = function (name) { return H[name] === undefined ? '' : row[H[name]]; };
+  return {
+    ok: true,
+    review: {
+      titulo: exam.titulo,
+      nombre: String(get('nombre')),
+      apellidos: String(get('apellidos')),
+      nota: finalGrade_(exam, openQs, questions, row, H),
+      aciertos: get('aciertos'), errores: get('errores'), blancos: get('blancos'),
+      imagenes: loadImages_(exam.id, questions),
+      questions: questions.map(function (q) {
+        var base = { id: q.id, text: q.text, valor: questionValue_(q) };
+        if (isOpen_(q)) {
+          var c = openColumns_(q, questions);
+          var pts = H[c.pts] === undefined ? '' : row[H[c.pts]];
+          base.tipo = 'abierta';
+          base.respuesta = H[c.resp] === undefined ? '' : String(row[H[c.resp]]);
+          base.puntos = pts === '' ? null : Number(pts);
+          return base;
+        }
+        var given = answers[q.id];
+        if (isShort_(q)) {
+          base.tipo = 'corta';
+          base.correctas = q.respuestas.slice();
+          base.respuesta = typeof given === 'string' && given.trim() !== '' ? given : null;
+          base.acertada = shortCorrect_(q, base.respuesta, shortOverrides_(row, H));
+          return base;
+        }
+        base.tipo = 'test';
+        base.options = (q.options || []).map(function (o) { return { id: o.id, text: o.text }; });
+        base.correcta = q.correct;
+        base.respuesta = typeof given === 'string' && given !== '' ? given : null;
+        return base;
+      })
+    }
+  };
 }
 
 function listExams_(params) {
@@ -387,7 +522,7 @@ function listExams_(params) {
   if (auth) return auth;
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var exams = readExams_().map(function (ex) {
-    var sh = ss.getSheetByName('R_' + ex.id);
+    var sh = findResultsSheet_(ex);
     return {
       id: ex.id,
       titulo: ex.titulo,
@@ -397,9 +532,12 @@ function listExams_(params) {
       salidas_permitidas: ex.salidas_permitidas,
       penalizacion: ex.penalizacion,
       pantalla_completa: ex.pantalla_completa,
+      revision: ex.revision,
       codigo_acceso: ex.codigo_acceso,
       tiempo_min: ex.tiempo_min,
       n_preguntas: JSON.parse(ex.preguntas_json).length,
+      n_abiertas: JSON.parse(ex.preguntas_json).filter(isOpen_).length,
+      n_cortas: JSON.parse(ex.preguntas_json).filter(isShort_).length,
       envios: sh ? Math.max(0, sh.getLastRow() - 1) : 0,
       creado: ex.creado,
       results_url: sh ? ss.getUrl() + '#gid=' + sh.getSheetId() : ss.getUrl()
@@ -408,19 +546,256 @@ function listExams_(params) {
   return { ok: true, exams: exams };
 }
 
+// Datos para la pantalla de corrección del panel: una fila por envío, con las respuestas abiertas y sus puntos.
+function results_(p) {
+  var auth = checkToken_(p.token);
+  if (auth) return auth;
+  var exam = findExam_(p.examId);
+  if (!exam) return fail_('not_found', 'Este examen no existe.');
+  var questions = JSON.parse(exam.preguntas_json);
+  var sh = findResultsSheet_(exam);
+  var rows = sh ? sh.getDataRange().getValues() : [];
+  var H = rows.length ? headerMap_(rows[0].map(String)) : {};
+  var openQs = questions.filter(isOpen_);
+  var shortQs = questions.filter(isShort_);
+  var out = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    var get = function (name) { return H[name] === undefined ? '' : r[H[name]]; };
+    var abiertas = {};
+    openQs.forEach(function (q) {
+      var c = openColumns_(q, questions);
+      var pts = H[c.pts] === undefined ? '' : r[H[c.pts]];
+      abiertas[q.id] = { texto: H[c.resp] === undefined ? '' : String(r[H[c.resp]]), puntos: pts === '' ? null : Number(pts) };
+    });
+    // Respuestas cortas: lo escrito, la corrección automática y la manual (null si no se ha tocado).
+    var cortas = {};
+    if (shortQs.length) {
+      var answers = {};
+      try { answers = JSON.parse(String(get('respuestas_json') || '{}')) || {}; } catch (err) { answers = {}; }
+      var manual = shortOverrides_(r, H);
+      shortQs.forEach(function (q) {
+        var texto = typeof answers[q.id] === 'string' ? answers[q.id] : '';
+        cortas[q.id] = { texto: texto, auto: texto.trim() !== '' && shortAnswerMatches_(q.respuestas, texto), manual: typeof manual[q.id] === 'boolean' ? manual[q.id] : null };
+      });
+    }
+    var fecha = get('fecha');
+    out.push({
+      envio_id: String(get('envio_id')),
+      apellidos: String(get('apellidos')),
+      nombre: String(get('nombre')),
+      grupo: String(get('grupo')),
+      aciertos: get('aciertos'), errores: get('errores'), blancos: get('blancos'),
+      salidas: Number(get('salidas')) || 0,
+      segundos_fuera: Number(get('segundos_fuera')) || 0,
+      pegados: Number(get('pegados')) || 0,
+      fecha: fecha instanceof Date ? fecha.toISOString() : String(fecha),
+      nota: finalGrade_(exam, openQs, questions, r, H),
+      pendientes: openQs.filter(function (q) { return abiertas[q.id].puntos === null; }).length,
+      abiertas: abiertas,
+      cortas: cortas
+    });
+  }
+  return {
+    ok: true,
+    exam: {
+      id: exam.id, titulo: exam.titulo,
+      preguntas: questions.map(function (q, i) {
+        var out = { id: q.id, n: i + 1, title: q.title, text: q.text, tipo: questionType_(q), valor: questionValue_(q) };
+        if (isShort_(q)) out.respuestas = q.respuestas.slice(); // solo con el token del profesor
+        return out;
+      }),
+      imagenes: loadImages_(exam.id, questions)
+    },
+    rows: out
+  };
+}
+
+// Nota sobre 10 de una fila: test + puntos puestos en las abiertas (las no corregidas suman 0).
+function finalGrade_(exam, openQs, questions, row, H) {
+  var base = Number(row[H.nota]);
+  if (!openQs.length || H.puntos_test === undefined || H.puntos_total === undefined) return isFinite(base) ? base : '';
+  var sum = Number(row[H.puntos_test]) || 0;
+  openQs.forEach(function (q) {
+    var c = openColumns_(q, questions);
+    if (H[c.pts] !== undefined && row[H[c.pts]] !== '') sum += Number(row[H[c.pts]]) || 0;
+  });
+  var total = Number(row[H.puntos_total]);
+  if (!total) return '';
+  var nota = sum / total * 10;
+  if (!exam.permitir_negativa && nota < 0) nota = 0;
+  return Math.round((nota + Number.EPSILON * Math.sign(nota)) * 100) / 100 || 0;
+}
+
+// Pone (o borra, con null) los puntos de una pregunta abierta de un envío.
+function grade_(p) {
+  var auth = checkToken_(p.token);
+  if (auth) return auth;
+  var exam = findExam_(p.examId);
+  if (!exam) return fail_('not_found', 'Este examen no existe.');
+  var questions = JSON.parse(exam.preguntas_json);
+  var q = questions.filter(function (x) { return x.id === p.qid; })[0];
+  if (isShort_(q)) return gradeShort_(p, exam, questions, q);
+  if (!q || !isOpen_(q)) return fail_('invalid_grade', 'Esa pregunta no es abierta.');
+  var puntos = null;
+  if (p.puntos !== null && p.puntos !== undefined && p.puntos !== '') {
+    puntos = Number(p.puntos);
+    if (!isFinite(puntos) || puntos < 0 || puntos > questionValue_(q)) {
+      return fail_('invalid_grade', 'Los puntos deben estar entre 0 y ' + questionValue_(q) + '.');
+    }
+    puntos = Math.round(puntos * 10000) / 10000;
+  }
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (err) {
+    return fail_('busy', 'El servidor está ocupado. Inténtalo de nuevo en unos segundos.');
+  }
+  try {
+    var sh = getResultsSheet_(exam, questions);
+    var rows = sh.getDataRange().getValues();
+    var H = headerMap_(rows[0].map(String));
+    var c = openColumns_(q, questions);
+    if (H[c.pts] === undefined || H.envio_id === undefined) return fail_('invalid_grade', 'La hoja de este examen no admite corrección.');
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][H.envio_id]) !== String(p.envioId)) continue;
+      sh.getRange(i + 1, H[c.pts] + 1).setValue(puntos === null ? '' : puntos);
+      rows[i][H[c.pts]] = puntos === null ? '' : puntos;
+      var openQs = questions.filter(isOpen_);
+      var pend = openQs.filter(function (x) { var v = rows[i][H[openColumns_(x, questions).pts]]; return v === '' || v === undefined; }).length;
+      var nota = finalGrade_(exam, openQs, questions, rows[i], H);
+      // Se escriben valores (no fórmulas): la nota y las pendientes de la hoja siempre coinciden con el panel.
+      if (nota !== '') sh.getRange(i + 1, (H.nota_final !== undefined ? H.nota_final : H.nota) + 1).setValue(nota);
+      if (H.pendientes !== undefined) sh.getRange(i + 1, H.pendientes + 1).setValue(pend);
+      return { ok: true, puntos: puntos, pendientes: pend, nota: nota };
+    }
+    return fail_('not_found', 'No se ha encontrado ese envío.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Corrige a mano una respuesta corta: correcta true/false, o null para volver a la corrección automática.
+// Recalcula aciertos, errores, puntos del test y nota del envío.
+function gradeShort_(p, exam, questions, q) {
+  var correcta = p.correcta === true ? true : p.correcta === false ? false : null;
+  if (p.correcta !== undefined && p.correcta !== null && correcta === null) {
+    return fail_('invalid_grade', 'La corrección debe ser correcta o incorrecta.');
+  }
+  var lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(20000);
+  } catch (err) {
+    return fail_('busy', 'El servidor está ocupado. Inténtalo de nuevo en unos segundos.');
+  }
+  try {
+    var sh = getResultsSheet_(exam, questions);
+    var rows = sh.getDataRange().getValues();
+    var H = headerMap_(rows[0].map(String));
+    if (H.cortas_manual === undefined || H.envio_id === undefined) return fail_('invalid_grade', 'La hoja de este examen no admite corrección.');
+    for (var i = 1; i < rows.length; i++) {
+      var row = rows[i];
+      if (String(row[H.envio_id]) !== String(p.envioId)) continue;
+      var answers = {};
+      try { answers = JSON.parse(String(row[H.respuestas_json] || '{}')) || {}; } catch (err) { answers = {}; }
+      var manual = shortOverrides_(row, H);
+      if (correcta === null) delete manual[q.id];
+      else manual[q.id] = correcta;
+      var result = gradeExam_(questions, answers, {
+        allowNegative: exam.permitir_negativa,
+        penalty: exam.penalizacion ? parsePenalty_(exam.penalizacion) : null,
+        shortOverrides: manual
+      });
+      var json = Object.keys(manual).length ? JSON.stringify(manual) : '';
+      var set = function (name, value) {
+        if (H[name] === undefined) return;
+        row[H[name]] = value;
+        sh.getRange(i + 1, H[name] + 1).setValue(value);
+      };
+      set('cortas_manual', json);
+      set('aciertos', result.aciertos);
+      set('errores', result.errores);
+      set('blancos', result.blancos);
+      set('puntos_test', result.puntosTest);
+      set('nota', result.nota);
+      var openQs = questions.filter(isOpen_);
+      var nota = finalGrade_(exam, openQs, questions, row, H);
+      if (openQs.length && nota !== '') set('nota', nota);
+      return {
+        ok: true, correcta: correcta, acertada: shortCorrect_(q, answers[q.id], manual),
+        aciertos: result.aciertos, errores: result.errores, nota: nota
+      };
+    }
+    return fail_('not_found', 'No se ha encontrado ese envío.');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /* ------------------------------------------------------------------ */
 /* Corrección (réplica exacta de js/grading.js)                        */
 /* ------------------------------------------------------------------ */
 
+function questionValue_(q) {
+  var v = Number(q && q.valor);
+  return isFinite(v) && v > 0 ? v : 1;
+}
+
+function isOpen_(q) {
+  return !!q && q.tipo === 'abierta';
+}
+
+function isShort_(q) {
+  return !!q && q.tipo === 'corta';
+}
+
+// Correcciones a mano de las respuestas cortas de una fila: {id de pregunta: true (correcta) | false}.
+function shortOverrides_(row, H) {
+  if (H.cortas_manual === undefined || row[H.cortas_manual] === '') return {};
+  try {
+    var o = JSON.parse(String(row[H.cortas_manual]));
+    return o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  } catch (err) {
+    return {};
+  }
+}
+
+// ¿Está bien una respuesta corta? La corrección a mano, si la hay; si no, la automática. En blanco nunca.
+function shortCorrect_(q, given, overrides) {
+  if (typeof given !== 'string' || !given.trim()) return false;
+  return typeof overrides[q.id] === 'boolean' ? overrides[q.id] : shortAnswerMatches_(q.respuestas, given);
+}
+
+function questionType_(q) {
+  return isOpen_(q) ? 'abierta' : isShort_(q) ? 'corta' : 'test';
+}
+
 function gradeExam_(questions, answers, opts) {
   var allowNegative = !!(opts && opts.allowNegative);
   var penalty = (opts && opts.penalty) || null; // {num, den}: fracción de punto por error; null = 1/(opciones-1)
+  var manual = (opts && opts.shortOverrides) || {}; // respuesta corta corregida a mano: id -> true/false
   if (!questions.length) throw new Error('El examen no tiene preguntas.');
 
   var aciertos = 0, errores = 0, blancos = 0, penalizacion = 0;
+  var valorAciertos = 0, valorErrores = 0, puntosTestMax = 0, puntosTotal = 0, abiertas = 0;
 
   questions.forEach(function (q) {
+    var valor = questionValue_(q);
+    puntosTotal += valor;
+    if (isOpen_(q)) { abiertas++; return; }
+    puntosTestMax += valor;
     var given = answers ? answers[q.id] : undefined;
+    if (isShort_(q)) {
+      if (given !== undefined && given !== null && typeof given !== 'string') {
+        throw new Error('Respuesta no válida en ' + q.id);
+      }
+      if (!given || !given.trim()) blancos++;
+      else if (typeof manual[q.id] === 'boolean' ? manual[q.id] : shortAnswerMatches_(q.respuestas, given)) {
+        aciertos++;
+        valorAciertos += valor;
+      } else errores++; // sin penalización: es difícil acertar escribiendo al azar
+      return;
+    }
     if (given === undefined || given === null || given === '') {
       blancos++;
       return;
@@ -430,20 +805,69 @@ function gradeExam_(questions, answers, opts) {
     }
     if (given === q.correct) {
       aciertos++;
+      valorAciertos += valor;
     } else {
       errores++;
-      if (!penalty) penalizacion += 1 / (q.options.length - 1);
+      valorErrores += valor;
+      if (!penalty) penalizacion += valor / (q.options.length - 1);
     }
   });
 
-  // Con penalización propia se calcula con enteros: (aciertos·den − errores·num) / den.
-  var puntos = penalty ? (aciertos * penalty.den - errores * penalty.num) / penalty.den : aciertos - penalizacion;
-  var nota = (puntos / questions.length) * 10;
+  // Con penalización propia se calcula con enteros: (Σacierto·den − Σerror·num) / den.
+  var puntos = penalty ? (valorAciertos * penalty.den - valorErrores * penalty.num) / penalty.den : valorAciertos - penalizacion;
+  function round2(x) {
+    var r = Math.round((x + Number.EPSILON * Math.sign(x)) * 100) / 100;
+    return r === 0 ? 0 : r; // evita -0
+  }
+  var nota = (puntos / puntosTotal) * 10;
   if (!allowNegative && nota < 0) nota = 0;
-  nota = Math.round((nota + Number.EPSILON * Math.sign(nota)) * 100) / 100;
-  if (nota === 0) nota = 0; // evita -0
+  nota = round2(nota);
+  var puntosTest = round2(!allowNegative && puntos < 0 ? 0 : puntos);
 
-  return { aciertos: aciertos, errores: errores, blancos: blancos, puntos: puntos, nota: nota };
+  return { aciertos: aciertos, errores: errores, blancos: blancos, puntos: puntos, puntosTest: puntosTest,
+    puntosTestMax: round2(puntosTestMax), puntosTotal: round2(puntosTotal), abiertas: abiertas, nota: nota };
+}
+
+/* ------------------------------------------------------------------ */
+/* Respuesta corta (réplica exacta de js/short.js)                     */
+/* ------------------------------------------------------------------ */
+
+var SHORT_RUNS_ = /\p{L}+|[^\p{L}]+/gu; // tramos de letras y de lo demás: "hierro(III)" → hierro, (, III, )
+
+// ¿Cuentan las mayúsculas en este tramo de letras? Sí si lleva alguna que no sea solo la inicial de un
+// tramo de 3 o más letras: NaCl, Fe, O, III, pH → sí; óxido, Óxido, Ohm → no.
+function runMatters_(run) {
+  if (run === run.toLowerCase()) return false;
+  var rest = run.slice(1);
+  return rest !== rest.toLowerCase() || run.length < 3;
+}
+
+// Forma comparable: sin espacios de más, sin espacios junto a los paréntesis ni punto final;
+// subíndices (H₂O) como dígitos normales. Las tildes cuentan: la ortografía se tiene en cuenta.
+function shortKey_(text) {
+  return String(text === undefined || text === null ? '' : text)
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\(\s*/g, '(')
+    .replace(/\s*\)/g, ')')
+    .trim()
+    .replace(/\.+$/, '')
+    .trim();
+}
+
+function shortAnswerMatches_(accepted, given) {
+  var number = /^[+-]?\d+(?:[.,]\d+)?$/;
+  return (accepted || []).some(function (answer) {
+    var a = shortKey_(answer);
+    var b = shortKey_(given);
+    if (!a) return false;
+    if (a.indexOf(' ') === -1) b = b.replace(/ /g, ''); // "Na Cl" vale por "NaCl"
+    if (number.test(a) && number.test(b)) return Number(a.replace(',', '.')) === Number(b.replace(',', '.'));
+    if (a.toLowerCase() !== b.toLowerCase()) return false;
+    var ra = a.match(SHORT_RUNS_);
+    var rb = b.match(SHORT_RUNS_);
+    return ra.length === rb.length && ra.every(function (run, k) { return !runMatters_(run) || run === rb[k]; });
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,6 +891,12 @@ function checkCode_(exam, code) {
   var given = String(code === undefined || code === null ? '' : code).trim();
   if (given === '') return 'code_required';
   return given.toLowerCase() === exam.codigo_acceso.toLowerCase() ? null : 'bad_code';
+}
+
+// Instrucciones del examen: se conservan los saltos de línea; como mucho MAX_INSTRUCTIONS caracteres.
+function cleanInstructions_(s) {
+  return String(s === undefined || s === null ? '' : s).replace(/\r\n?/g, '\n').replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_INSTRUCTIONS);
 }
 
 function cleanText_(s) {
@@ -716,6 +1146,33 @@ function validateQuestions_(qs) {
     seen[q.id] = true;
     var text = typeof q.text === 'string' ? q.text.trim() : '';
     if (!text) throw new Error('Pregunta ' + n + ': enunciado vacío.');
+    var valor = q.valor === undefined || q.valor === null ? 1 : Number(q.valor);
+    if (!isFinite(valor) || valor <= 0 || valor > MAX_VALUE) {
+      throw new Error('Pregunta ' + n + ': el valor debe ser mayor que 0 y como mucho ' + MAX_VALUE + '.');
+    }
+    valor = Math.round(valor * 10000) / 10000;
+    var title = typeof q.title === 'string' ? q.title.trim() : '';
+    if (q.tipo === 'abierta') {
+      if (Array.isArray(q.options) && q.options.length) {
+        throw new Error('Pregunta ' + n + ': una pregunta abierta no lleva opciones.');
+      }
+      return { id: q.id, title: title, text: text, options: [], correct: null, tipo: 'abierta', valor: valor };
+    }
+    if (q.tipo === 'corta') {
+      if (Array.isArray(q.options) && q.options.length) {
+        throw new Error('Pregunta ' + n + ': una pregunta de respuesta corta no lleva opciones.');
+      }
+      if (!Array.isArray(q.respuestas) || !q.respuestas.length || q.respuestas.length > MAX_SHORT_ANSWERS) {
+        throw new Error('Pregunta ' + n + ': debe tener entre 1 y ' + MAX_SHORT_ANSWERS + ' respuestas aceptadas.');
+      }
+      var respuestas = q.respuestas.map(function (r) {
+        var t = typeof r === 'string' ? r.replace(/\s+/g, ' ').trim() : '';
+        if (!t || t.length > MAX_SHORT_CHARS) throw new Error('Pregunta ' + n + ': respuestas aceptadas no válidas.');
+        return t;
+      });
+      return { id: q.id, title: title, text: text, options: [], correct: null, respuestas: respuestas, tipo: 'corta', valor: valor };
+    }
+    if (q.tipo !== undefined && q.tipo !== 'test') throw new Error('Pregunta ' + n + ': tipo de pregunta no válido.');
     if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > MAX_OPTIONS) {
       throw new Error('Pregunta ' + n + ': debe tener entre 2 y ' + MAX_OPTIONS + ' opciones.');
     }
@@ -731,10 +1188,12 @@ function validateQuestions_(qs) {
     if (!ids[q.correct]) throw new Error('Pregunta ' + n + ': la respuesta correcta no es una de las opciones.');
     return {
       id: q.id,
-      title: typeof q.title === 'string' ? q.title.trim() : '',
+      title: title,
       text: text,
       options: options,
-      correct: q.correct
+      correct: q.correct,
+      tipo: 'test',
+      valor: valor
     };
   });
 }
@@ -768,10 +1227,14 @@ function headerMap_(headers) {
 }
 
 // Si la hoja es de una versión anterior (menos columnas), añade las cabeceras que faltan.
+// Devuelve true si ha añadido alguna.
 function ensureHeaders_(sheet, headers) {
+  var added = false;
   for (var i = sheet.getLastColumn(); i < headers.length; i++) {
     sheet.getRange(1, i + 1).setValue(headers[i]);
+    added = true;
   }
+  return added;
 }
 
 function getExamsSheet_() {
@@ -782,26 +1245,216 @@ function getExamsSheet_() {
     sh.appendRow(EXAM_HEADERS);
     sh.setFrozenRows(1);
     setTextColumns_(sh, [1, 3, 5]);
-  } else {
-    ensureHeaders_(sh, EXAM_HEADERS);
+    formatExamsSheet_(sh);
+  } else if (ensureHeaders_(sh, EXAM_HEADERS)) {
+    formatExamsSheet_(sh); // las columnas nuevas (p. ej. revision) con el mismo aspecto que las demás
   }
   return sh;
 }
 
-function getResultsSheet_(examId) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var name = 'R_' + examId;
-  var sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
-    sh.appendRow(RESULT_HEADERS);
+// Orden de las columnas de una hoja nueva: primero lo que el profesor mira (quién, nota final, incidencias)
+// y, al final y ocultas, las columnas técnicas (respuestas, puntos de las abiertas, identificadores).
+function newResultLayout_(questions) {
+  var open = (questions || []).filter(isOpen_);
+  var visible = ['apellidos', 'nombre', 'grupo', 'nota'];
+  if (open.length) visible.push('pendientes');
+  visible = visible.concat(['aciertos', 'errores', 'blancos', 'salidas', 'segundos_fuera', 'pegados', 'duracion_min', 'fecha', 'posible_duplicado']);
+  var hidden = ['puntos_test', 'puntos_total'];
+  open.forEach(function (q) {
+    var c = openColumns_(q, questions);
+    hidden.push(c.resp, c.pts);
+  });
+  if ((questions || []).some(isShort_)) hidden.push('cortas_manual');
+  hidden = hidden.concat(['tipo_envio', 'envio_id', 'motivos_salida', 'respuestas_json']);
+  return { headers: visible.concat(hidden), visible: visible.length };
+}
+
+// Solo presentación: si algo falla aquí, la hoja sigue siendo válida.
+function formatResultsSheet_(sh, layout) {
+  var n = layout.headers.length;
+  var vis = layout.visible;
+  var rowsMax = sh.getMaxRows();
+  try {
+    sh.setFrozenColumns(2);
+    sh.setColumnWidth(1, 170);
+    sh.setColumnWidth(2, 130);
+    sh.setColumnWidth(3, 80);
+    for (var c = 4; c <= vis; c++) sh.setColumnWidth(c, 95);
+    sh.setColumnWidth(vis - 1, 150); // fecha
+    if (n > vis) sh.hideColumns(vis + 1, n - vis);
+  } catch (err) {
+    console.error(err);
+  }
+  try {
+    // Cabecera azul, filas alternas y bordes suaves en la parte visible.
+    var head = sh.getRange(1, 1, 1, vis);
+    head.setFontWeight('bold').setBackground('#1f5fbf').setFontColor('#ffffff')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+    sh.setRowHeight(1, 38);
+    sh.getRange(1, 1, 1, 3).setHorizontalAlignment('left');
+    var body = sh.getRange(2, 1, rowsMax - 1, vis);
+    body.setVerticalAlignment('middle').setBorder(true, true, true, true, true, true, '#d9dee5', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(2, 4, rowsMax - 1, vis - 3).setHorizontalAlignment('center');
+    sh.getRange(2, 4, rowsMax - 1, 1).setFontWeight('bold').setFontSize(12).setNumberFormat('0.00');
+    var rule = function (name, build) {
+      var col = layout.headers.indexOf(name) + 1;
+      if (!col) return null;
+      return build(SpreadsheetApp.newConditionalFormatRule()).setRanges([sh.getRange(2, col, rowsMax - 1, 1)]).build();
+    };
+    var rules = [
+      rule('nota', function (r) { return r.whenNumberLessThan(5).setBackground('#fde2e1').setFontColor('#a4262c'); }),
+      rule('nota', function (r) { return r.whenNumberGreaterThanOrEqualTo(5).setBackground('#dff3e4').setFontColor('#176b34'); }),
+      rule('pendientes', function (r) { return r.whenNumberGreaterThan(0).setBackground('#fff1c9').setFontColor('#8a5a00').setBold(true); }),
+      rule('salidas', function (r) { return r.whenNumberGreaterThan(0).setBackground('#fde2e1').setFontColor('#a4262c').setBold(true); }),
+      rule('segundos_fuera', function (r) { return r.whenNumberGreaterThan(0).setBackground('#fde2e1').setFontColor('#a4262c'); }),
+      rule('pegados', function (r) { return r.whenNumberGreaterThan(0).setBackground('#fff1c9').setFontColor('#8a5a00').setBold(true); }),
+      rule('posible_duplicado', function (r) { return r.whenFormulaSatisfied('=$' + String.fromCharCode(64 + layout.headers.indexOf('posible_duplicado') + 1) + '2=TRUE').setBackground('#fff1c9').setFontColor('#8a5a00'); })
+    ].filter(Boolean);
+    sh.setConditionalFormatRules(rules);
+    sh.getRange(2, 1, rowsMax - 1, vis).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Cabeceras de la respuesta y los puntos de una pregunta abierta (Q3 …). Solo dependen de su posición y título.
+function openColumns_(q, questions) {
+  var n = questions.indexOf(q) + 1;
+  var t = (q.title || '').replace(/\s+/g, ' ').slice(0, 30);
+  var base = 'Q' + n + (t ? ' ' + t : '');
+  return { resp: base + ' respuesta', pts: base + ' puntos (máx ' + questionValue_(q) + ')' };
+}
+
+// Cabeceras de las columnas añadidas a una hoja de resultados, según las preguntas del examen.
+function resultHeaders_(questions) {
+  var cols = RESULT_POINTS.slice();
+  var open = (questions || []).filter(isOpen_);
+  open.forEach(function (q) {
+    var c = openColumns_(q, questions);
+    cols.push(c.resp, c.pts);
+  });
+  if (open.length) cols.push('pendientes');
+  if ((questions || []).some(isShort_)) cols.push('cortas_manual');
+  return cols;
+}
+
+// Solo presentación (se puede repetir sin problema): cabecera de color, filas alternas, «activo» en verde o rojo
+// y ocultas las columnas técnicas (las preguntas con sus soluciones y el identificador de la hoja de resultados).
+function formatExamsSheet_(sh) {
+  var n = EXAM_HEADERS.length;
+  var col = function (name) { return EXAM_HEADERS.indexOf(name) + 1; };
+  var rowsMax = sh.getMaxRows();
+  try {
+    // Exámenes publicados antes de existir la columna «revision»: vacía equivale a FALSO; se escribe para que se vea igual.
+    var last = sh.getLastRow();
+    if (last > 1) {
+      var ids = sh.getRange(2, 1, last - 1, 1).getValues();
+      var rev = sh.getRange(2, col('revision'), last - 1, 1);
+      var vals = rev.getValues();
+      var changed = false;
+      for (var r = 0; r < vals.length; r++) {
+        if (ids[r][0] !== '' && vals[r][0] === '') { vals[r][0] = false; changed = true; }
+      }
+      if (changed) rev.setValues(vals);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+  try {
     sh.setFrozenRows(1);
-    setTextColumns_(sh, RESULT_TEXT_COLUMNS.map(function (name) { return RESULT_HEADERS.indexOf(name) + 1; }));
+    sh.setFrozenColumns(2);
+    sh.setColumnWidth(col('id'), 95);
+    sh.setColumnWidth(col('titulo'), 280);
+    sh.setColumnWidth(col('grupo_destino'), 90);
+    sh.setColumnWidth(col('codigo_acceso'), 100);
+    sh.setColumnWidth(col('creado'), 140);
+    sh.setColumnWidth(col('revision'), 90);
+    sh.setColumnWidth(col('instrucciones'), 260);
+    sh.hideColumns(col('preguntas_json'), 1);
+    sh.hideColumns(col('hoja_id'), 1);
+  } catch (err) {
+    console.error(err);
+  }
+  try {
+    sh.getRange(1, 1, 1, n).setFontWeight('bold').setBackground('#1f5fbf').setFontColor('#ffffff')
+      .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+    sh.setRowHeight(1, 38);
+    sh.getRange(1, col('titulo'), 1, 1).setHorizontalAlignment('left');
+    sh.getRange(2, 1, rowsMax - 1, n).setVerticalAlignment('middle')
+      .setBorder(true, true, true, true, true, true, '#d9dee5', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getRange(2, col('activo'), rowsMax - 1, n - col('activo') + 1).setHorizontalAlignment('center');
+    sh.getRange(2, col('titulo'), rowsMax - 1, 1).setFontWeight('bold');
+    sh.getRange(2, col('instrucciones'), rowsMax - 1, 1).setHorizontalAlignment('left').setWrap(true);
+    sh.getRange(2, col('creado'), rowsMax - 1, 1).setNumberFormat('dd/mm/yyyy hh:mm');
+    // «activo» y «revision»: VERDADERO en verde y FALSO en rojo.
+    var rules = [];
+    ['activo', 'revision'].forEach(function (name) {
+      var letter = String.fromCharCode(64 + col(name));
+      var rule = function (formula, bg, fg) {
+        return SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(formula).setBackground(bg).setFontColor(fg).setBold(true)
+          .setRanges([sh.getRange(2, col(name), rowsMax - 1, 1)]).build();
+      };
+      rules.push(rule('=$' + letter + '2=TRUE', '#dff3e4', '#176b34'), rule('=$' + letter + '2=FALSE', '#fde2e1', '#a4262c'));
+    });
+    sh.setConditionalFormatRules(rules);
+    var old = sh.getBandings();
+    for (var i = 0; i < old.length; i++) old[i].remove();
+    sh.getRange(2, 1, rowsMax - 1, n).applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, false, false);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+// Nombre de pestaña válido a partir del título: sin caracteres prohibidos, máximo 90 y sin repetir otra pestaña.
+function sheetNameFor_(title) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var base = String(title || '').replace(/[\[\]*\/\\?:]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '').slice(0, 90).trim() || 'Examen';
+  var name = base;
+  for (var i = 2; ss.getSheetByName(name); i++) name = base + ' (' + i + ')';
+  return name;
+}
+
+// La hoja de resultados de un examen: por su identificador (sigue valiendo si la renombras) o, en los exámenes
+// anteriores, por el nombre R_<id>.
+function findResultsSheet_(exam) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (exam.hoja_id !== '' && exam.hoja_id !== undefined) {
+    var all = ss.getSheets();
+    for (var i = 0; i < all.length; i++) {
+      if (String(all[i].getSheetId()) === String(exam.hoja_id)) return all[i];
+    }
+  }
+  return ss.getSheetByName('R_' + exam.id);
+}
+
+function createResultsSheet_(title, questions) {
+  var layout = newResultLayout_(questions);
+  var headers = layout.headers;
+  var sh = SpreadsheetApp.getActiveSpreadsheet().insertSheet(sheetNameFor_(title));
+  sh.appendRow(headers);
+  sh.setFrozenRows(1);
+  formatResultsSheet_(sh, layout);
+  var textNames = RESULT_TEXT_COLUMNS.concat(['cortas_manual'], (questions || []).filter(isOpen_).map(function (q) { return openColumns_(q, questions).resp; }));
+  setTextColumns_(sh, textNames.map(function (nm) { return headers.indexOf(nm) + 1; }).filter(function (c) { return c > 0; }));
+  return sh;
+}
+
+// Devuelve la hoja del examen; si no existe (p. ej. se borró) la crea y anota su identificador. Usar con el lock tomado.
+function getResultsSheet_(exam, questions) {
+  var sh = findResultsSheet_(exam);
+  if (!sh) {
+    sh = createResultsSheet_(exam.titulo, questions);
+    var exams = getExamsSheet_();
+    var rows = exams.getDataRange().getValues();
+    var col = EXAM_HEADERS.indexOf('hoja_id');
+    for (var i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(exam.id)) { exams.getRange(i + 1, col + 1).setValue(sh.getSheetId()); break; }
+    }
   } else {
-    // Hoja de una versión anterior: se añaden al final las columnas extra que falten (por nombre).
+    // Hoja de una versión anterior: se añaden al final las columnas que falten (por nombre).
     var have = headerMap_(sh.getDataRange().getValues()[0].map(String));
-    RESULT_EXTRA.forEach(function (name) {
-      if (have[name] === undefined) sh.getRange(1, sh.getLastColumn() + 1).setValue(name);
+    RESULT_EXTRA.concat(resultHeaders_(questions)).forEach(function (nm) {
+      if (have[nm] === undefined) sh.getRange(1, sh.getLastColumn() + 1).setValue(nm);
     });
   }
   return sh;
@@ -829,7 +1482,10 @@ function readExams_() {
       control_salidas: toBool_(r[12]),
       salidas_permitidas: allowedExits_(r[13]),
       penalizacion: storedPenalty_(r[14]),
-      pantalla_completa: toBool_(r[15])
+      pantalla_completa: toBool_(r[15]),
+      hoja_id: r[16] === '' || r[16] === undefined ? '' : String(r[16]),
+      revision: toBool_(r[17]),
+      instrucciones: r[18] === undefined ? '' : String(r[18])
     });
   }
   return out;
@@ -846,8 +1502,9 @@ function findExam_(id) {
 
 /**
  * Opcional: ejecútala una vez a mano desde el editor para crear la hoja
- * "Examenes" y comprobar que los permisos están concedidos.
+ * "Examenes" y comprobar que los permisos están concedidos. También vuelve a dar
+ * formato a la hoja "Examenes" (útil tras actualizar el script).
  */
 function setup() {
-  getExamsSheet_();
+  formatExamsSheet_(getExamsSheet_());
 }
