@@ -8,7 +8,7 @@ import { collectImageRefs, matchImage, MAX_IMAGES, MAX_TOTAL_IMAGE_CHARS } from 
 import { prepareImage } from "./image-encode.js";
 import { richNodes } from "./rich.js";
 import { caseMatters } from "./short.js";
-import { showCorrection, exportNotes } from "./correction.js";
+import { showCorrection, exportNotes, exportGift } from "./correction.js";
 
 const TOKEN_KEY = "admin_token";
 const WARN_CHARS = 45000;
@@ -213,6 +213,17 @@ function showPanel(initialExams) {
         });
         const copy = h("button", { class: "btn secondary small", type: "button" }, "Copiar enlace");
         copy.addEventListener("click", () => copyText(link, copy));
+        const giftBtn = h("button", { class: "btn secondary small", type: "button" }, "Exportar preguntas (GIFT)");
+        giftBtn.addEventListener("click", async () => {
+          giftBtn.disabled = true;
+          try {
+            const err = await exportGift(token, ex);
+            if (err) alert(err);
+          } catch (e) {
+            alert(errorText(e));
+          }
+          giftBtn.disabled = false;
+        });
         const exportBtn = h("button", { class: "btn secondary small", type: "button" }, "Exportar notas (CSV)");
         exportBtn.addEventListener("click", async () => {
           exportBtn.disabled = true;
@@ -227,7 +238,7 @@ function showPanel(initialExams) {
         return h(
           "div",
           { class: "exam-item" },
-          h("h3", {}, ex.titulo, " ", h("span", { class: `badge ${ex.activo ? "on" : "off"}` }, ex.activo ? "Abierto" : "Cerrado"), ex.control_salidas ? " " : null, ex.control_salidas ? h("span", { class: "badge on" }, `Vigilado · ${ex.salidas_permitidas ?? 3} salidas${ex.pantalla_completa ? " · pantalla completa" : ""}`) : null, ex.revision ? " " : null, ex.revision ? h("span", { class: "badge on" }, "Revisión publicada") : null),
+          h("h3", {}, ex.titulo, " ", h("span", { class: `badge ${ex.activo ? "on" : "off"}` }, ex.activo ? "Abierto" : "Cerrado"), ex.control_salidas ? " " : null, ex.control_salidas ? h("span", { class: "badge on" }, `Vigilado · ${ex.salidas_permitidas ?? 3} salidas${ex.pantalla_completa ? " · pantalla completa en ordenadores" : ""}`) : null, ex.revision ? " " : null, ex.revision ? h("span", { class: "badge on" }, "Revisión publicada") : null),
           h(
             "p",
             { class: "muted small meta" },
@@ -248,6 +259,7 @@ function showPanel(initialExams) {
               ? h("button", { class: "btn small", type: "button", onclick: () => showCorrection(app, { token, ex, onBack: main, onUnauthorized }) }, ex.n_abiertas ? "Corregir abiertas" : "Revisar respuestas cortas")
               : null,
             exportBtn,
+            giftBtn,
             toggle,
             reviewToggle,
             copy,
@@ -341,7 +353,7 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
     salidasInput,
     h("small", { class: "hint" }, "Al superarlas, el examen se envía solo. Con 3, a la cuarta salida se envía. Con 0, se envía en la primera.")
   );
-  const pantallaCompleta = check("Exigir pantalla completa (opcional): pide pantalla completa al empezar y oculta el examen si se sale de ella", false);
+  const pantallaCompleta = check("Exigir pantalla completa en ordenadores (Mac y Windows; opcional): pide pantalla completa al empezar y oculta el examen si se sale de ella. En iPad, tabletas y móviles no se pide", false);
   const refreshVigilar = () => {
     salidasInput.disabled = !vigilar.input.checked;
     pantallaCompleta.input.disabled = !vigilar.input.checked;
@@ -560,6 +572,7 @@ function renderCreate(box, { onPublished, onUnauthorized }) {
         tiempo_min: Number(tiempo.value) || 0,
         codigo_acceso: codigo.value.trim(),
         instrucciones: instrucciones.value.trim(),
+        gift: gift.value, // el GIFT original, para poder exportarlo tal cual
         barajar_preguntas: barPreg.input.checked,
         barajar_opciones: barOpc.input.checked,
         mostrar_nota: mostrar.input.checked,

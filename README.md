@@ -154,7 +154,9 @@ La hoja de Google guarda los puntos, y la **nota final** de cada alumno (columna
 - Solo vale para envíos hechos con esta versión: los exámenes entregados antes no guardaron el identificador en el dispositivo.
 - Requiere `Code.gs` actualizado; si no lo está, el botón no aparece.
 
-**Exportar las notas.** El botón **Exportar notas (CSV)** de cada examen descarga una tabla limpia (apellidos, nombre, grupo, nota final, aciertos, errores, en blanco, salidas, segundos fuera, intentos de pegar), ordenada por apellidos y lista para abrir en Excel en español (separador `;`, decimales con coma).
+**Exportar las preguntas (GIFT).** El botón **Exportar preguntas (GIFT)** de cada examen descarga sus preguntas, con las soluciones, en un archivo `.gift`: sirve para reutilizar un examen, retocarlo y publicarlo de nuevo, o recuperar el GIFT si lo has perdido. Al publicar, el panel guarda el **GIFT original tal como lo subiste** (con tus comentarios y tu formato) en la columna oculta `gift` de la pestaña `Examenes`, y eso es lo que se descarga. En los exámenes publicados antes de esta versión (o si el GIFT no cabía en una celda), se genera a partir de las preguntas guardadas: mismas preguntas, valores y soluciones, pero sin tus comentarios. Las instrucciones para el alumno van al principio como comentario (para reutilizarlas, cópialas al campo de instrucciones). Las imágenes no van dentro: el GIFT solo las cita por su nombre, así que al publicarlo de nuevo tendrás que volver a subirlas. El archivo lleva las soluciones: guárdalo fuera del repositorio. Requiere `Code.gs` actualizado.
+
+**Exportar las notas.** El botón **Exportar notas (CSV)** de cada examen descarga una tabla limpia (apellidos, nombre, grupo, nota final, aciertos, errores, en blanco, salidas, segundos fuera, desconexiones, segundos sin conexión, intentos de pegar), ordenada por apellidos y lista para abrir en Excel en español (separador `;`, decimales con coma).
 
 **Qué ve el alumno.** Solo la parte del test: «Parte tipo test: X sobre Y puntos» y el aviso de que las abiertas las corrige el profesor. Si quitas «Mostrar la nota al alumno», no ve nada.
 
@@ -235,7 +237,7 @@ Requiere `Code.gs` actualizado: si no lo está, el panel lo detecta y **no publi
 
 1. Abre `admin.html` e introduce tu token (se guarda solo en tu navegador).
 2. En **Crear examen**, sube el archivo (o pega el texto). Verás una vista previa con la respuesta correcta marcada; revisa que sea la que esperas. Si hay errores, la pantalla te dice en qué pregunta.
-3. Rellena los ajustes: título, grupo, tiempo límite, código de acceso (opcional), **penalización por cada error**, barajar preguntas y opciones, mostrar la nota al terminar, permitir nota negativa, **vigilar salidas** (con cuántas se permiten) y, opcionalmente, **exigir pantalla completa**.
+3. Rellena los ajustes: título, grupo, tiempo límite, código de acceso (opcional), **penalización por cada error**, barajar preguntas y opciones, mostrar la nota al terminar, permitir nota negativa, **vigilar salidas** (con cuántas se permiten) y, opcionalmente, **exigir pantalla completa en ordenadores**.
 4. **Publicar examen.** Obtendrás un **enlace** y un **código QR** para dárselos a los alumnos.
 
 ### Examen vigilado (control de salidas)
@@ -262,13 +264,15 @@ La nota se calcula con normalidad: la app **no pone un 0 automático**. Las colu
 | Página oculta | Otra pestaña, otra app (cuando cubre todo), pantalla bloqueada | al instante en ordenadores; 2 s en tabletas (al desplazarse con el dedo desde el borde, el iPad activa a veces el Dock o la multitarea un instante) |
 | Ventana reducida | Solo en tabletas: pantalla dividida, Slide Over o Stage Manager que reducen la ventana. No cuenta mientras el alumno escribe en un cuadro de texto (el teclado en pantalla también encoge la ventana) ni al ampliar con dos dedos | 1,5 s |
 | Ventana sin foco | Solo en ordenadores: hacer clic en otra ventana o app. En tabletas no se usa, porque Safari en iPad la activa al ocultar el teclado y en otros gestos sin que el alumno salga | 2 s |
-| Salir de la pantalla completa | **Solo si marcas «Exigir pantalla completa»** al publicar (opcional, desactivada por defecto). Se pide pantalla completa al empezar; si el alumno sale de ella, el examen se oculta y un **toque** en cualquier parte (o el botón) la restaura | 5 s en tabletas, 1,5 s en ordenadores |
+| Salir de la pantalla completa | **Solo en ordenadores (Mac, Windows, Linux, Chromebook) y solo si marcas «Exigir pantalla completa en ordenadores»** al publicar (opcional, desactivada por defecto). Se pide pantalla completa al empezar; si el alumno sale de ella, el examen se oculta y un clic en cualquier parte (o el botón) la restaura. En iPad, tabletas y móviles no se pide nunca | 1,5 s |
 
-La pantalla completa es opcional porque su comportamiento depende mucho del navegador y del dispositivo. Sin ella, la vigilancia sigue funcionando con las demás señales: la pantalla dividida se detecta por el tamaño de la ventana.
+La pantalla completa es opcional y **solo se exige en ordenadores**, donde funciona bien. En tabletas y móviles su comportamiento depende demasiado del navegador, así que allí no se pide aunque marques la opción: la vigilancia sigue funcionando con las demás señales (la pantalla dividida se detecta por el tamaño de la ventana). Un mismo examen puede hacerse a la vez en ordenadores, con pantalla completa, y en iPad, sin ella.
 
 **Al empezar no se penaliza nada.** Mientras el examen no esté bien colocado (por ejemplo, empezado en pantalla dividida, o sin pantalla completa si la has exigido), el alumno ve un aviso («Pon el examen a toda la pantalla… Esto todavía no cuenta como salida») y la vigilancia no empieza hasta que lleva 1,5 s seguidos en buen estado. Si el navegador no permite la pantalla completa, no se exige. Tras pedirla, se esperan 2,5 s a que el navegador termine de cambiar de tamaño.
 
-Cada salida guarda en la hoja **qué señal la provocó** (`motivos_salida`, por ejemplo `reduced,hidden`): si en algún dispositivo salen salidas que no esperas, esa columna dice la causa.
+Cada salida guarda en la hoja **qué señal la provocó** (`motivos_salida`, por ejemplo `reduced,hidden`): si en algún dispositivo salen salidas que no esperas, esa columna dice la causa. Los motivos posibles son `hidden` (página oculta), `reduced` (ventana reducida), `blurred` y `noFocus` (otra ventana activa, solo en ordenadores) y `fullscreenLost` (salió de la pantalla completa).
+
+**Pérdida de la conexión a internet.** Cuando el dispositivo del alumno se queda sin red durante el examen (wifi caído o apagado, modo avión), **solo se registra**: no cuenta como salida, no oculta el examen y no lo envía. La hoja guarda cuántas veces la perdió (`desconexiones`) y cuánto tiempo estuvo sin ella (`segundos_sin_conexion`), las dos en ámbar cuando son mayores que 0, y añade `offline` a `motivos_salida` por cada corte (por ejemplo `hidden,offline`). Se registra en todos los exámenes, vigilados o no. Las respuestas se siguen guardando en el dispositivo; si el alumno intenta enviar sin conexión, se le avisa y puede reintentar cuando vuelva. Se detecta que el dispositivo se queda sin red; un wifi conectado pero sin salida a internet puede no detectarse.
 
 Durante un examen vigilado se pide al navegador que **mantenga la pantalla encendida**, para que el iPad no se bloquee solo mientras el alumno lee o piensa (eso contaba como salida). Funciona en iPadOS 16.4 o posterior; en versiones anteriores, sube el bloqueo automático en *Ajustes → Pantalla y brillo*.
 
@@ -286,7 +290,7 @@ Las hojas **nuevas** están pensadas para leerse de un vistazo: cabecera azul, f
 
 `apellidos | nombre | grupo | nota | (pendientes) | aciertos | errores | blancos | salidas | segundos_fuera | pegados | duracion_min | fecha | posible_duplicado`
 
-La **nota** sale en verde (aprobado) o rojo; `pendientes` (preguntas abiertas sin corregir), `salidas`, `segundos_fuera` y `pegados` se marcan en color cuando son mayores que 0. Después van **ocultas** las columnas técnicas (puntos del test, respuestas y puntos de las abiertas, `tipo_envio`, `envio_id`, `motivos_salida`, `respuestas_json`); si las necesitas, selecciona las columnas vecinas y elige «Mostrar columnas». Las hojas de exámenes anteriores conservan su formato.
+La **nota** sale en verde (aprobado) o rojo; `pendientes` (preguntas abiertas sin corregir), `salidas`, `segundos_fuera`, `desconexiones`, `segundos_sin_conexion` y `pegados` se marcan en color cuando son mayores que 0. Después van **ocultas** las columnas técnicas (puntos del test, respuestas y puntos de las abiertas, `tipo_envio`, `envio_id`, `motivos_salida`, `respuestas_json`); si las necesitas, selecciona las columnas vecinas y elige «Mostrar columnas». Las hojas de exámenes anteriores conservan su formato.
 
 El alumno rellena **Nombre** y **Apellidos** en casillas separadas, y la hoja se mantiene **ordenada alfabéticamente por apellidos** (y, si coinciden, por nombre; sin distinguir tildes ni mayúsculas) cada vez que llega un envío.
 
@@ -347,7 +351,7 @@ Si el examen no carga en los dispositivos del centro pero sí con datos móviles
 
 ## Qué datos se guardan
 
-Solo **nombre, apellidos, grupo, respuestas, nota y los datos de las salidas del examen** (cuántas y cuánto tiempo, si vigilas) de cada alumno, en tu hoja de Google. Las imágenes de los enunciados también se guardan ahí. No se piden correos ni otros datos y los alumnos no tienen cuenta. No compartas la hoja con nadie: contiene las soluciones y los nombres. Recuerda informar a las familias de este tratamiento según la política de tu centro.
+Solo **nombre, apellidos, grupo, respuestas, nota y los datos de las salidas del examen** (cuántas y cuánto tiempo, si vigilas) y de las pérdidas de conexión de cada alumno, en tu hoja de Google. Las imágenes de los enunciados también se guardan ahí. No se piden correos ni otros datos y los alumnos no tienen cuenta. No compartas la hoja con nadie: contiene las soluciones y los nombres. Recuerda informar a las familias de este tratamiento según la política de tu centro.
 
 ## Problemas frecuentes
 
